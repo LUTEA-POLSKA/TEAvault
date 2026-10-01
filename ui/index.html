@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en" data-theme="tea" data-density="default">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      No remote origins, no inline scripts. The UI only ever talks to the Rust
+      shell over Tauri IPC, and the shell only ever talks to the local daemon.
+      There is nothing here that needs the network.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
+    />
+    <title>TEAvault</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

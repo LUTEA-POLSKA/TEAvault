@@ -1,0 +1,27 @@
+/target
+**/target
+node_modules
+dist
+dist-ssr
+*.local
+.vite
+
+# TAURI
+src-tauri/target
+src-tauri/gen
+
+# TEAvault runtime state — never commit these
+*.teavault
+*.vault
+vault.json
+vault.json.bak
+audit.log
+keyring.json
+backups/
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.swp

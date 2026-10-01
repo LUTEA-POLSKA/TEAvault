@@ -1,0 +1,53 @@
+[package]
+name = "teavault-app"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+description = "TEAvault desktop UI. A thin shell: all authority lives in teavault-core behind the daemon's pipe."
+publish = false
+
+[[bin]]
+name = "teavault-app"
+path = "src/main.rs"
+
+[lib]
+name = "teavault_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+teavault-core = { path = "../crates/teavault-core" }
+teavault-daemon = { path = "../crates/teavault-daemon" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+# For the native half of `fixed_size.rs`. Tauri's API covers the user-initiated
+# drag (`set_resizable`), but not the two paths it cannot express: maximising, and
+# `WM_GETMINMAXINFO`, which is what Windows consults for maximise, restore and
+# snap. Those need a window procedure, and that needs the raw API.
+#
+# Pinned to the same version already in the lock file, so this adds no second
+# copy of the crate.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+]
+
+[features]
+# Enabled by `tauri build`; keeps `cargo check` from needing a frontend build.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

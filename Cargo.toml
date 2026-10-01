@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/teavault-core",
+    "crates/teavault-cli",
+    "crates/teavault-daemon",
+]
+exclude = ["src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/landnevermore/TEAvault"
+
+[workspace.dependencies]
+teavault-core = { path = "crates/teavault-core", version = "0.1.0" }
+
+aes-gcm = { version = "0.11", default-features = false, features = [
+    "aes",
+    "alloc",
+    "getrandom",
+    "zeroize",
+] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "password-hash"] }
+zeroize = { version = "1.9", features = ["derive", "zeroize_derive"] }
+rand = "0.9"
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+fs2 = "0.4"
+tempfile = "3"
+sha2 = "0.10"
+hmac = "0.12"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
