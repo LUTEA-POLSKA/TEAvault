@@ -61,12 +61,6 @@ pub struct Grant {
     pub client_label: String,
     /// Which entry this grant covers. Exactly one.
     pub entry_id: String,
-    /// Optional project directory the request came from, when the client
-    /// reported one. Advisory: a client can report any directory, so this is
-    /// shown to the user as unverified context, never used as the deciding
-    /// factor on its own.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_dir: Option<String>,
     /// Optional free text from the client explaining why it wants the key.
     /// Untrusted. Shown quoted in the dialog so it cannot masquerade as UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,17 +85,11 @@ impl Grant {
             client_fingerprint: client_fingerprint.into(),
             client_label: client_label.into(),
             entry_id: entry_id.into(),
-            project_dir: None,
             declared_purpose: None,
             mode,
             granted_at: crate::model::now_rfc3339(),
             consumed: false,
         }
-    }
-
-    pub fn with_project_dir(mut self, dir: Option<String>) -> Self {
-        self.project_dir = dir;
-        self
     }
 
     pub fn with_purpose(mut self, purpose: Option<String>) -> Self {
@@ -531,19 +519,5 @@ mod tests {
         assert_eq!(set.prune(1_001), 3);
         assert_eq!(set.grants.len(), 1);
         assert_eq!(set.grants[0].client_fingerprint, "c1");
-    }
-
-    #[test]
-    fn project_dir_and_purpose_are_carried_but_never_decide_anything() {
-        let g = grant("client", "entry", forever())
-            .with_project_dir(Some(r"C:\work\thing".into()))
-            .with_purpose(Some("run tests".into()));
-        let set = GrantSet::new(vec![g]);
-        // A request whose project dir differs is still allowed: the directory
-        // is context for the user, not a constraint we can trust.
-        assert!(matches!(
-            set.decide("client", "entry", 1_000),
-            Decision::Allowed(_)
-        ));
     }
 }

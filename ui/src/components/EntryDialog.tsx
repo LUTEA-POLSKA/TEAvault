@@ -1,243 +1,249 @@
 /**
- * Create or edit an entry.
+ * Create or change a key.
  *
- * The secret field uses `PasswordInput`, so the value is masked by default even
- * while typing — a screen share of this dialog does not show the key.
+ * ## The secret is a textarea, not a password field
  *
- * On edit, the secret field is left empty and only sent when the user types
- * something, so editing a description cannot silently overwrite a stored key.
+ * API keys are long, contain no asterisks to suggest length, and are pasted from
+ * a provider's dashboard. A single-line password input hides what was pasted and
+ * makes a truncated paste undetectable. The field is a clear textarea — this is
+ * the owner typing their own key into their own vault, and obscuring it helps
+ * nobody. Nothing reaches another program until a grant says so.
+ *
+ * ## The variable name comes first
+ *
+ * It is the identifier: the display name, provider and note are annotations on it.
+ * Leading with the annotations buries the one field the user has to get exactly
+ * right, and it is the field every program will refer to.
+ *
+ * ## Every control is TEAui's
+ *
+ * The first version of this dialog hand-styled raw `<input>` elements against
+ * guessed CSS variables (`--tea-color-line`, which TEAui 1.0 does not define).
+ * The result was an invisible field — no border, no background, and no error
+ * until someone looked at the computed style. TEAui's own `Input` carries the
+ * correct classes, so the styling is not a thing this file has to get right.
  */
 
 import { useState } from 'react'
-
 import {
+  Alert,
   Button,
-  Checkbox,
-  Dialog,
-  DialogBody,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  Field,
-  FieldDescription,
-  FieldError,
-  FieldLabel,
+  Card,
+  CardBody,
+  HStack,
   Input,
-  PasswordInput,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
   Stack,
+  Switch,
+  Text,
   Textarea,
-  toast,
 } from '@tea-ui/core'
+import type { ListEntry } from '../api'
+import { LabelledField } from './LabelledField'
+import { Modal } from './Modal'
 
-import { api, ListEntry, PROVIDERS, SUGGESTED_CAPABILITIES, VaultError } from '../api'
+const INPUT_CLASS = 'w-full'
 
 export function EntryDialog({
-  mode,
   entry,
+  providers,
   onClose,
-  onSaved,
+  onSave,
   onError,
 }: {
-  mode: 'create' | 'edit'
   entry: ListEntry | null
+  providers: string[]
   onClose: () => void
-  onSaved: () => Promise<void>
+  onSave: (input: EntryInput) => Promise<void>
   onError: (e: unknown) => void
 }) {
   const [name, setName] = useState(entry?.name ?? '')
   const [displayName, setDisplayName] = useState(entry?.display_name ?? '')
-  const [provider, setProvider] = useState(entry?.provider ?? 'OpenAI')
+  const [provider, setProvider] = useState(entry?.provider ?? (providers[0] ?? 'OpenAI'))
   const [description, setDescription] = useState(entry?.description ?? '')
-  const [capabilities, setCapabilities] = useState<string[]>(entry?.capabilities ?? [])
-  const [hidden, setHidden] = useState(entry?.hidden ?? false)
   const [secret, setSecret] = useState('')
+  const [hidden, setHidden] = useState(entry?.hidden ?? false)
   const [busy, setBusy] = useState(false)
-  const [problem, setProblem] = useState<string | null>(null)
+  const [localError, setLocalError] = useState<string | null>(null)
 
-  function toggleCapability(c: string) {
-    setCapabilities((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]))
-  }
+  const editing = entry !== null
+  const nameValid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)
 
-  async function save() {
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    if (!nameValid) {
+      setLocalError(
+        'The variable name may contain letters, digits and underscores, and must not start with a digit.',
+      )
+      return
+    }
+    if (!editing && secret.trim() === '') {
+      setLocalError('A key needs a value.')
+      return
+    }
     setBusy(true)
-    setProblem(null)
+    setLocalError(null)
     try {
-      if (mode === 'create') {
-        if (!secret) {
-          setProblem('A key value is required.')
-          return
-        }
-        await api.createEntry({
-          name,
-          displayName,
-          provider,
-          description: description || undefined,
-          capabilities,
-          hidden,
-          secret,
-        })
-        toast({ title: `${name} added`, tone: 'positive' })
-      } else {
-        if (!entry) return
-        await api.updateEntry({
-          entry: entry.id,
-          displayName,
-          provider,
-          description: description || undefined,
-          capabilities,
-          hidden,
-          // Only sent when typed, so editing a description cannot wipe the key.
-          secret: secret || undefined,
-        })
-        toast({ title: `${name} updated`, tone: 'positive' })
-      }
-      setSecret('')
-      onClose()
-      await onSaved()
-    } catch (e) {
-      if (e instanceof VaultError) setProblem(e.message)
-      else onError(e)
+      await onSave({
+        id: entry?.id ?? null,
+        name,
+        display_name: displayName.trim() || name,
+        provider: provider.trim(),
+        description: description.trim() || null,
+        hidden,
+        secret: secret.trim() || null,
+      })
+    } catch (err) {
+      onError(err)
     } finally {
       setBusy(false)
     }
   }
 
-  const suggestions = SUGGESTED_CAPABILITIES[provider] ?? []
-
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent size="lg" closeLabel="Cancel">
-        <DialogHeader>
-          <DialogTitle>{mode === 'create' ? 'Add an API key' : `Edit ${entry?.name}`}</DialogTitle>
-          <DialogDescription>
-            Provider and capability labels are your own description of the key. TEAvault never
-            contacts a provider to check it, because that would send the secret somewhere it does
-            not control.
-          </DialogDescription>
-        </DialogHeader>
+    <Modal
+      open
+      onClose={onClose}
+      title={editing ? `Edit ${entry!.name}` : 'Add a key'}
+      description={
+        editing
+          ? 'The value stays as it is unless you replace it below.'
+          : 'The value is encrypted with your master passphrase before it touches the disk.'
+      }
+      size="lg"
+      footer={
+        <>
+          <Button type="button" size="sm" variant="secondary" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" size="sm" variant="primary" loading={busy} form="entry-form">
+            {editing ? 'Save changes' : 'Add key'}
+          </Button>
+        </>
+      }
+    >
+      <form id="entry-form" onSubmit={submit}>
+        <Stack gap="ui">
+          {localError && <Alert tone="critical" role="alert">{localError}</Alert>}
 
-        <DialogBody>
-          <Stack gap="section">
-            <Field required invalid={!!problem}>
-              <FieldLabel>Variable name</FieldLabel>
-              <Input
-                value={name}
-                onChange={(e) => setName(e.currentTarget.value)}
-                placeholder="OPENAI_API_KEY"
-                disabled={mode === 'edit'}
-                autoComplete="off"
-                spellCheck={false}
-              />
-              <FieldDescription>
-                Uppercase letters, digits and underscores, like an environment variable.
-              </FieldDescription>
-              <FieldError>{problem}</FieldError>
-            </Field>
+          <LabelledField
+            label="Variable name"
+            description="Uppercase, digits and underscores. This is how a program will refer to it."
+            required
+          >
+            <Input
+              className={`${INPUT_CLASS} font-mono`}
+              value={name}
+              onChange={(e) => setName(e.target.value.toUpperCase())}
+              disabled={editing}
+              autoFocus
+              required
+              placeholder="OPENAI_API_KEY"
+            />
+          </LabelledField>
 
-            <Field required>
-              <FieldLabel>Display name</FieldLabel>
+          <div className="grid grid-cols-2 gap-3">
+            <LabelledField label="Label" description="Optional, for you.">
               <Input
+                className={INPUT_CLASS}
                 value={displayName}
-                onChange={(e) => setDisplayName(e.currentTarget.value)}
-                placeholder="OpenAI — production"
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder="Personal key"
               />
-            </Field>
+            </LabelledField>
 
-            <Field>
-              <FieldLabel>Provider</FieldLabel>
-              <Select value={provider} onValueChange={(v) => setProvider(v)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {PROVIDERS.map((p) => (
-                    <SelectItem key={p} value={p}>
-                      {p}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-
-            <Field>
-              <FieldLabel>Description</FieldLabel>
-              <Textarea
-                rows={3}
-                value={description}
-                onChange={(e) => setDescription(e.currentTarget.value)}
-                placeholder="What this key is for, and anything a future reader should know."
-              />
-            </Field>
-
-            <Field>
-              <FieldLabel>Capabilities</FieldLabel>
-              <Stack direction="horizontal" gap="none">
-                {[...new Set([...suggestions, ...capabilities])].map((c) => (
-                  <Checkbox
-                    key={c}
-                    checked={capabilities.includes(c)}
-                    onCheckedChange={() => toggleCapability(c)}
-                    label={c}
-                  />
-                ))}
-              </Stack>
-              <FieldDescription>Free-form tags. They describe the key; they do not restrict it.</FieldDescription>
-            </Field>
-
-            <Field>
-              <Checkbox
-                checked={hidden}
-                onCheckedChange={setHidden}
-                label="Hide until approved"
-              />
-              <FieldDescription>
-                Off: any local client can see that this key exists, though releasing it still needs
-                your approval. On: it does not appear in listings at all until you have approved a
-                client for it.
-              </FieldDescription>
-            </Field>
-
-            <Field required={mode === 'create'}>
-              <FieldLabel>{mode === 'create' ? 'Key value' : 'Replace key value'}</FieldLabel>
-              <PasswordInput
-                autoComplete="off"
-                value={secret}
-                onValueChange={setSecret}
-                placeholder={mode === 'create' ? 'Paste the key' : 'Leave empty to keep the current value'}
-                spellCheck={false}
-              />
-              <FieldDescription>
-                {mode === 'create'
-                  ? 'Stored encrypted. The field is masked so a screen share does not reveal it.'
-                  : 'Only sent when you type something, so editing other fields cannot overwrite the key.'}
-              </FieldDescription>
-            </Field>
-          </Stack>
-        </DialogBody>
-
-        <DialogFooter>
-          <Stack direction="horizontal" gap="ui" justify="end">
-            <Button variant="ghost" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              loading={busy}
-              disabled={!name || !displayName || (mode === 'create' && !secret)}
-              onClick={() => void save()}
+            <LabelledField
+              label="Provider"
+              description={
+                // Free text rather than a fixed list: providers are not an enum,
+                // and a closed dropdown would refuse to store a key for a
+                // service nobody thought of.
+                `Suggestions: ${providers.slice(0, 3).join(', ')}`
+              }
             >
-              {mode === 'create' ? 'Add key' : 'Save changes'}
-            </Button>
-          </Stack>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+              <Input
+                className={INPUT_CLASS}
+                value={provider}
+                onChange={(e) => setProvider(e.target.value)}
+                list="teavault-providers"
+              />
+            </LabelledField>
+            {/* Suggestions for the provider field, kept out of the field itself. */}
+            <datalist id="teavault-providers">
+              {providers.map((p) => (
+                <option key={p} value={p} />
+              ))}
+            </datalist>
+          </div>
+
+          <LabelledField
+            label="Note"
+            description="Optional. Shown next to the key, never sent anywhere."
+          >
+            <Input
+              className={INPUT_CLASS}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="What it is for"
+            />
+          </LabelledField>
+
+          <LabelledField
+            label={editing ? 'Replace the value' : 'Key value'}
+            description={
+              editing
+                ? 'Leave empty to keep the current value. Filling this in overwrites it, and the old value cannot be recovered.'
+                : 'Pasted from the provider. Stored encrypted; never shown in full again once you leave this dialog.'
+            }
+            required={!editing}
+          >
+            <Textarea
+              className={`${INPUT_CLASS} font-mono text-xs`}
+              value={secret}
+              onChange={(e) => setSecret(e.target.value)}
+              rows={2}
+              required={!editing}
+            />
+          </LabelledField>
+
+          <div>
+            <Switch checked={hidden} onCheckedChange={setHidden} label="Hidden until approved" />
+            <Text size="ui" tone="subtle" className="block">
+              A hidden key is not listed to any program. It appears only after you approve a
+              request for it.
+            </Text>
+          </div>
+        </Stack>
+      </form>
+    </Modal>
+  )
+}
+
+export interface EntryInput {
+  id: string | null
+  name: string
+  display_name: string
+  provider: string
+  description: string | null
+  hidden: boolean
+  secret: string | null
+}
+
+/** The note shown after a copy, with the countdown the user asked about. */
+export function CopiedNote({ masked, clearedIn }: { masked: string; clearedIn: number | null }) {
+  return (
+    <Card>
+      <CardBody>
+        <HStack align="center" justify="between" gap="ui">
+          <Text size="ui">
+            Copied <code>{masked}</code> to the clipboard.
+          </Text>
+          {clearedIn !== null && (
+            <Text size="ui" tone="subtle">
+              clears in {clearedIn}s
+            </Text>
+          )}
+        </HStack>
+      </CardBody>
+    </Card>
   )
 }

@@ -77,6 +77,13 @@ fn run() -> Result<(), String> {
         exe.to_string_lossy().to_string(),
     ));
 
+    // The audit chain key is wrapped with DPAPI before the first event is
+    // written, so the MAC on every audit entry is account-bound and survives a
+    // restart. Without this the log is a bare hash chain, which anyone able to
+    // edit the file can simply recompute — and the documentation used to claim
+    // the stronger guarantee while the keyring stored an empty string.
+    vault.set_audit_protector(Arc::new(teavault_daemon::audit_key::DpapiProtector::new()));
+
     println!("TEAvault daemon");
     println!("  vault:    {}", vault.paths().display());
     println!("  pipe:     {}", teavault_daemon::pipe::PIPE_NAME);

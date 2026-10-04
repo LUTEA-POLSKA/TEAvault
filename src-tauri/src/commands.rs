@@ -97,6 +97,18 @@ pub fn lock(client: State<'_, SharedClient>) -> Result<serde_json::Value, Comman
     forward(client, "lock", Operation::Lock)
 }
 
+/// Delete the vault and start over. The way out of a forgotten passphrase.
+///
+/// Owner tier only, and the daemon enforces that: an agent process cannot reach
+/// this any more than it can change the passphrase. The UI puts a confirmation in
+/// front of it, but the confirmation is there for the user's benefit, not as the
+/// control - a web view that skipped it would still be refused nothing extra,
+/// because the authority check happens on the far side of the pipe.
+#[tauri::command]
+pub fn wipe(client: State<'_, SharedClient>) -> Result<serde_json::Value, CommandError> {
+    forward(client, "wipe", Operation::Wipe)
+}
+
 #[tauri::command]
 pub fn list(client: State<'_, SharedClient>, provider: Option<String>) -> Result<serde_json::Value, CommandError> {
     forward(client, "list", Operation::List { provider })
@@ -240,6 +252,17 @@ pub fn grant(
 #[tauri::command]
 pub fn revoke_grant(client: State<'_, SharedClient>, grant_id: String) -> Result<serde_json::Value, CommandError> {
     forward(client, "revoke", Operation::Revoke { grant_id })
+}
+
+/// The clients the daemon has actually seen connect.
+///
+/// This is the *only* list a permission can be created against, which is why it
+/// exists as an operation rather than being assembled in the frontend: a
+/// compromised UI could offer any fingerprint it liked, and the daemon's refusal
+/// is the only thing that stops the grant.
+#[tauri::command]
+pub fn known_clients(client: State<'_, SharedClient>) -> Result<serde_json::Value, CommandError> {
+    forward(client, "known_clients", Operation::KnownClients)
 }
 
 #[tauri::command]

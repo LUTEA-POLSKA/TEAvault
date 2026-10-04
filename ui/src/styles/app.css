@@ -1,0 +1,80 @@
+/*
+ * Typography and the few global rules that do not belong to a component.
+ *
+ * ## The font is set through TEAui's own token
+ *
+ * TEAui resolves every font from `--tea-font-sans`, so rebinding that one custom
+ * property restyles the whole component library — buttons, tabs, tables, the tab
+ * bar — without overriding a single component class. Setting `font-family` on
+ * `body` instead would leave any element TEAui styles from its own token
+ * untouched, which is exactly how a design system ends up with two typefaces.
+ *
+ * ## Montserrat Medium as the standard weight
+ *
+ * Weight 500 is the default everywhere. That falls out of which faces are
+ * imported (see `main.tsx`) rather than from a global `font-weight`: 400 is not
+ * among them, so a rule requesting 400 or lighter resolves to the nearest
+ * available face, which is 500. Rules asking for 600 or 700 get the real face.
+ *
+ * Deliberately absent: any global `letter-spacing` override. Montserrat is
+ * loosely spaced by design, and quietly shrinking its tracking behind a broad
+ * attribute selector would change the design system's own rhythm in ways nobody
+ * chose. Spacing belongs to the components that need it, decided there.
+ *
+ * ## What stays monospace, and why
+ *
+ * `--tea-font-mono` is left alone on purpose. It applies to the things whose
+ * characters have to be unambiguous: variable names, secret values, file paths,
+ * fingerprints. `OPENAI_API_KEY` and `0penai_key` differ by one glyph, and so do
+ * `l` and `1` in most API keys. A proportional face hides that difference, and
+ * these are strings the user compares and transcribes by hand. This is the one
+ * place a second typeface is load-bearing rather than decorative.
+ */
+
+:root {
+  --tea-font-sans:
+    'Montserrat', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+/*
+ * The window itself. `overflow: hidden` because the window is a fixed size: any
+ * element allowed to grow past it would centre itself against the overflow width
+ * and push the right-hand side out of view, which is what a horizontally
+ * scrolling body produces.
+ */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--tea-font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * Respect the system setting rather than assuming. A user who asked for less
+ * motion should not get animated transitions.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/*
+ * A visible focus ring is required for keyboard use. TEAui provides one on its own
+ * components; this guarantees it for the plain `button`/`input` elements the
+ * title bar and dialogs use, where nothing else styles focus.
+ */
+:focus-visible {
+  outline: 2px solid var(--tea-accent);
+  outline-offset: 1px;
+}

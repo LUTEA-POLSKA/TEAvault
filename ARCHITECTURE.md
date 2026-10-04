@@ -49,8 +49,25 @@ same route through four checks, in this order:
 2. **Tier.** May this client perform an operation of this tier at all? Checked
    from the kernel-reported image path, *before* any storage is touched, so an
    agent asking to create a key is refused without reading anything.
-3. **Locked.** Anything needing the data key is refused. `lock` and `status` are
-   exempt, because working while locked is their entire purpose.
+3. **Locked.** Anything needing the data key is refused. Five operations are
+   exempt, and each is exempt for the same structural reason — the operation is
+   either about the locked state itself, or about a vault that has nothing to
+   unlock:
+
+   | exempt | why |
+   |---|---|
+   | `lock` | working while locked is its entire purpose |
+   | `status` | the user must be able to ask whether it is locked |
+   | `unlock` | it *ends* the locked state; requiring an unlocked vault here would make unlocking impossible |
+   | `init` | a fresh vault is by definition locked; requiring an unlocked vault would make creating one impossible |
+   | `wipe` | it exists for a vault whose passphrase nobody has; requiring an unlocked vault would make it unreachable exactly when it is needed |
+
+   The last three can only be exempt safely because each one is uninteresting to
+   a lock: `unlock` can only *add* access and only with the correct passphrase;
+   `init` and `wipe` have no data key to reach. `unlock` was **not** exempt in an
+   earlier revision, which meant a created vault could never be opened again —
+   see the exemption's own doc comment in `ipc/mod.rs` for why it is easy to get
+   this wrong and why the fixture tests did not catch it.
 4. **The operation's own rules.** The grant check for `request`, existence
    checks, validation.
 
@@ -114,13 +131,14 @@ rules:
   - *deadline* — parked on a `Condvar` until a clipboard clear is due. With no
     copy pending the predicate is false and the wait is indefinite.
 - **No periodic vault scans.** The data file is read when a request needs it.
-- **Auto-lock without a timer.** `Session::seconds_until_auto_lock` is a pure
-  function of the last-activity timestamp. The daemon evaluates it when it
-  already has a reason to wake. Auto-lock therefore fires at the *next event*
-  rather than to the millisecond — harmless for a vault, because nothing can be
-  read between two events, and it means an idle vault costs nothing to enforce.
-- **One exception, in the UI.** A one-second interval counts down the
-  auto-lock timer for display. It reads a number the daemon computed and decides
+- **No auto-lock at all.** Locking is explicit — the tray, the UI button, or
+  shutdown. An idle timeout was considered and dropped: it needs a wake-up to
+  evaluate it, and every candidate wake-up (a timer, a poll, a per-request check)
+  either costs idle work or makes the deadline fuzzy. "Lock when you are done" is
+  a decision the user can actually make; a timeout they cannot predict is worse
+  than none.
+- **One exception, in the UI.** A one-second interval counts down the clipboard
+  clear deadline for display. It reads a number the daemon computed and decides
   nothing; a missed tick costs a stale countdown.
 
 Measured numbers, with conditions, are in [`BENCHMARKS.md`](BENCHMARKS.md).

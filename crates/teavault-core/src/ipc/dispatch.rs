@@ -208,12 +208,7 @@ impl<'v> Dispatcher<'v> {
 
             Operation::Unlock { passphrase } => {
                 self.vault.unlock(passphrase.as_bytes())?;
-                Ok(serde_json::json!({
-                    "locked": false,
-                    "auto_lock_in": self.vault.session().seconds_until_auto_lock(
-                        &self.vault.settings().auto_lock
-                    ),
-                }))
+                Ok(serde_json::json!({ "locked": false }))
             }
 
             Operation::Create {
@@ -330,7 +325,6 @@ impl<'v> Dispatcher<'v> {
                     &id,
                     mode.to_mode(None),
                     None,
-                    None,
                 )?;
                 Ok(serde_json::json!({ "resolved": true }))
             }
@@ -395,10 +389,6 @@ impl<'v> Dispatcher<'v> {
             entry_count: self.vault.entry_count().unwrap_or_default(),
             pending_approvals: self.vault.pending_approvals().len(),
             protocol: super::PROTOCOL,
-            auto_lock_in: self
-                .vault
-                .session()
-                .seconds_until_auto_lock(&self.vault.settings().auto_lock),
             kdf: self.vault.cost_summary(),
         }
     }

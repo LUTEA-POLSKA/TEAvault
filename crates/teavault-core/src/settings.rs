@@ -13,40 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{error::Result, model::now_rfc3339};
 
-/// How long an unlocked vault stays open without activity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutoLock {
-    /// Never lock on a timer. The user can still lock manually, and locking
-    /// still happens on sign-out and on quit.
-    Never,
-    /// Lock after this many seconds of inactivity. `0` is rejected as a value:
-    /// it would look like "never" while behaving like "immediately", which is
-    /// a good way to make a user think auto-lock is broken.
-    AfterSeconds(u32),
-}
-
-impl Default for AutoLock {
-    fn default() -> Self {
-        Self::AfterSeconds(300)
-    }
-}
-
-impl AutoLock {
-    /// Effective timeout, or `None` for [`AutoLock::Never`].
-    pub fn seconds(&self) -> Option<u64> {
-        match self {
-            Self::Never => None,
-            Self::AfterSeconds(s) => Some(*s as u64),
-        }
-    }
-}
-
 /// Everything the user can change. No secrets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
-    #[serde(default)]
-    pub auto_lock: AutoLock,
     /// How long a copied key stays on the clipboard. `0` disables clearing,
     /// which the UI presents as a deliberate choice with a warning.
     #[serde(default = "default_clipboard_secs")]
@@ -87,7 +56,6 @@ fn default_backup_every() -> u32 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            auto_lock: AutoLock::default(),
             clipboard_clear_seconds: default_clipboard_secs(),
             autostart: false,
             close_window_hides: true,
@@ -104,20 +72,6 @@ impl Settings {
     /// not ask for and cannot easily see.
     pub fn validate(&self) -> Result<()> {
         use crate::error::Error;
-        if let AutoLock::AfterSeconds(s) = self.auto_lock {
-            if s == 0 {
-                return Err(Error::invalid(
-                    "auto_lock",
-                    "0 seconds is not a setting; use \"never\" instead",
-                ));
-            }
-            if s < 10 {
-                return Err(Error::invalid(
-                    "auto_lock",
-                    "below 10 seconds the vault locks faster than a person can react",
-                ));
-            }
-        }
         if self.min_passphrase_chars < 8 {
             return Err(Error::invalid(
                 "min_passphrase_chars",
@@ -141,7 +95,6 @@ impl Settings {
         } else {
             std::mem::take(&mut self.created_at)
         };
-        self.auto_lock = next.auto_lock;
         self.clipboard_clear_seconds = next.clipboard_clear_seconds;
         self.autostart = next.autostart;
         self.close_window_hides = next.close_window_hides;
@@ -187,37 +140,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn auto_lock_of_zero_seconds_is_rejected_rather_than_silently_meaning_never() {
-        let s = Settings {
-            auto_lock: AutoLock::AfterSeconds(0),
-            ..Default::default()
-        };
-        assert!(s.validate().is_err());
-    }
-
-    #[test]
-    fn an_absurdly_short_auto_lock_is_rejected() {
-        let s = Settings {
-            auto_lock: AutoLock::AfterSeconds(3),
-            ..Default::default()
-        };
-        assert!(s.validate().is_err());
-    }
-
-    #[test]
-    fn never_is_a_distinct_valid_choice() {
-        let s = Settings {
-            auto_lock: AutoLock::Never,
-            ..Default::default()
-        };
-        s.validate().unwrap();
-        assert_eq!(s.auto_lock.seconds(), None);
-        assert_eq!(Settings::default().auto_lock.seconds(), Some(300));
-    }
-
-    #[test]
-    fn a_passphrase_minimum_below_eight_is_rejected() {
+#[test]
+fn a_passphrase_minimum_below_eight_is_rejected() {
         let s = Settings {
             min_passphrase_chars: 4,
             ..Default::default()
@@ -256,7 +180,7 @@ mod tests {
         let mut s = Settings::default();
         let original = s.clone();
         let bad = Settings {
-            auto_lock: AutoLock::AfterSeconds(1),
+            min_passphrase_chars: 4,
             autostart: true,
             ..Default::default()
         };

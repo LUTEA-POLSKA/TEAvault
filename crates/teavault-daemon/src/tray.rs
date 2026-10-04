@@ -30,16 +30,21 @@ use windows::{
                 NOTIFYICONDATAW,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-                DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW,
-                PostQuitMessage, RegisterClassW, SetForegroundWindow, TrackPopupMenu,
-                TranslateMessage, IDI_APPLICATION, MF_STRING, MSG, TPM_BOTTOMALIGN,
-                TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY,
-                WM_LBUTTONDBLCLK, WM_RBUTTONUP, WNDCLASSW,
+                AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
+                DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW,
+                GetCursorPos, GetMessageW, GetSystemMetrics, PostQuitMessage, RegisterClassW,
+                SetForegroundWindow, TrackPopupMenu, TranslateMessage, HICON, IMAGE_FLAGS,
+                MF_STRING, MSG, SM_CXSMICON, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WINDOW_EX_STYLE,
+                WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_RBUTTONUP,
+                WNDCLASSW,
             },
         },
     },
 };
+
+/// The application's icon, embedded at build time so the tray needs no files on
+/// disk. See `load_icon` for why it is parsed rather than loaded by path.
+const ICON_BYTES: &[u8] = include_bytes!("../../../src-tauri/icons/icon.ico");
 
 /// A private window message, so command ids cannot collide with the shell's.
 const WM_TRAY: u32 = WM_APP + 1;
@@ -99,6 +104,10 @@ impl TrayAction {
 pub struct Tray {
     hwnd: HWND,
     added: bool,
+    /// The icon handed to the shell. Owned, because it came from
+    /// `CreateIconFromResourceEx` rather than from `LoadIconW`: a loaded icon is
+    /// shared and must not be destroyed, a created one leaks if it is not.
+    icon: HICON,
 }
 
 /// What the pump decided.
@@ -142,7 +151,11 @@ impl Tray {
             )
             .map_err(|e| format!("creating the tray window failed: {e}"))?;
 
-            let mut tray = Self { hwnd, added: false };
+            let mut tray = Self {
+                hwnd,
+                added: false,
+                icon: load_icon()?,
+            };
             tray.add_icon(tip)?;
             Ok(tray)
         }
@@ -159,9 +172,7 @@ impl Tray {
                 ..Default::default()
             };
             copy_wide(tip, &mut data.szTip);
-            // The shell's default application icon. Shipping an .ico would mean
-            // embedding a binary asset, which is not worth the review surface.
-            data.hIcon = LoadIconW(None, IDI_APPLICATION).unwrap_or_default();
+            data.hIcon = self.icon;
 
             if Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
                 self.added = true;
@@ -287,6 +298,9 @@ impl Drop for Tray {
             // Without this the icon lingers until the user hovers it.
             let _ = Shell_NotifyIconW(NIM_DELETE, &data);
             let _ = DestroyWindow(self.hwnd);
+            // After the shell is told the icon is gone. Destroying first would
+            // leave a handle the shell could still be reading.
+            let _ = DestroyIcon(self.icon);
         }
     }
 }
@@ -313,9 +327,225 @@ fn copy_wide(src: &str, dst: &mut [u16]) {
     dst[i] = 0;
 }
 
+/// The application's icon, at whatever size the current display wants.
+///
+/// ## Why not `LoadIconW(None, IDI_APPLICATION)`
+///
+/// That is the shell's generic "some program" icon. Every vault manager would then
+/// be indistinguishable in the tray, which is the one place the user has to
+/// recognise the app at a glance.
+///
+/// ## Why the .ico is parsed here
+///
+/// `LoadImageW` takes a *file path*, which would mean locating an asset on disk at
+/// runtime and guessing where the installer put it. Embedding the bytes with
+/// `include_bytes!` keeps the icon inside the binary, so there is nothing to find,
+/// nothing to go missing, and no path to get wrong. A compiled-in blob is also
+/// reviewable: the same file is committed next to the source that documents it.
+///
+/// The path reaches across into `src-tauri/` because Tauri requires its icons
+/// there. One source of truth is worth more here than a tidy module boundary, and
+/// a wrong path fails the build rather than the tray.
+///
+/// ## Why the size is chosen per display
+///
+/// The tray icon is not a fixed pixel size: `SM_CXSMICON` is 16 at 100% and 24 at
+/// 150%. Handing the shell a 32px icon to downscale makes Windows resample it, and
+/// a resampled icon is visibly soft. So the metric is asked for and the smallest
+/// frame that covers it is used.
+fn load_icon() -> Result<HICON, String> {
+    let frames = parse_ico(ICON_BYTES)?;
+
+    let wanted = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as usize;
+    let chosen = pick_frame(&frames, wanted).ok_or("embedded icon has no usable frame")?;
+
+    unsafe {
+        // The frame bytes are a bare icon, not a whole .ico file: that is what a
+        // directory entry points at. `dwver` 0x00030000 is icon version 3, which is
+        // what lets Windows read the PNG-compressed frames the bundler writes.
+        //
+        // cxdesired/cydesired of zero with empty flags means "use the size it
+        // already is". Passing the metric here would make Win32 resample a frame
+        // that was selected to match it in the first place.
+        CreateIconFromResourceEx(
+            &ICON_BYTES[chosen.offset..chosen.offset + chosen.len],
+            true,
+            0x0003_0000,
+            0,
+            0,
+            IMAGE_FLAGS(0),
+        )
+        .map_err(|e| format!("CreateIconFromResourceEx failed: {e}"))
+    }
+}
+
+/// One frame in the .ico directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IconFrame {
+    /// Pixel size of the square frame.
+    size: usize,
+    /// Where the frame's bytes start in the file.
+    offset: usize,
+    /// How many bytes the frame occupies.
+    len: usize,
+}
+
+/// Read the directory of an .ico file.
+///
+/// Six byte header, then one sixteen byte entry per frame. Widths are a single
+/// byte, so 256 is stored as zero and has to be restored by hand.
+///
+/// Entries whose offset or length runs past the end of the blob are dropped rather
+/// than reported: a truncated icon should still yield its usable frames, and a
+/// frame that would hand `CreateIconFromResourceEx` a slice out of bounds is worse
+/// than no frame at all.
+fn parse_ico(ico: &[u8]) -> Result<Vec<IconFrame>, String> {
+    const HEADER: usize = 6;
+    const ENTRY: usize = 16;
+
+    if ico.len() < HEADER {
+        return Err("embedded icon is truncated".into());
+    }
+    if u16::from_le_bytes([ico[2], ico[3]]) != 1 {
+        return Err("embedded icon is not an .ico".into());
+    }
+
+    let count = u16::from_le_bytes([ico[4], ico[5]]) as usize;
+    let frames: Vec<IconFrame> = (0..count)
+        .filter_map(|i| {
+            let o = HEADER + i * ENTRY;
+            let raw = *ico.get(o)?;
+            let size = if raw == 0 { 256 } else { raw as usize };
+            let len =
+                u32::from_le_bytes([ico[o + 8], ico[o + 9], ico[o + 10], ico[o + 11]]) as usize;
+            let offset =
+                u32::from_le_bytes([ico[o + 12], ico[o + 13], ico[o + 14], ico[o + 15]]) as usize;
+            let end = offset.checked_add(len)?;
+            if end > ico.len() {
+                return None;
+            }
+            Some(IconFrame { size, offset, len })
+        })
+        .collect();
+
+    if frames.is_empty() {
+        return Err("embedded icon has no usable frame".into());
+    }
+    Ok(frames)
+}
+
+/// The frame to hand the shell: the smallest one that covers `wanted`, so the icon
+/// is never upscaled, and never downscaled either when an exact match exists.
+/// Falls back to the largest frame, because a scaled-up icon beats no icon.
+fn pick_frame(frames: &[IconFrame], wanted: usize) -> Option<&IconFrame> {
+    frames
+        .iter()
+        .filter(|f| f.size >= wanted)
+        .min_by_key(|f| f.size)
+        .or_else(|| frames.iter().max_by_key(|f| f.size))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
+
+    #[test]
+    fn the_embedded_icon_parses_and_offers_the_tray_sizes() {
+        // This is the test that would have caught a corrupt or truncated icon,
+        // which otherwise shows up as an invisible tray entry at runtime.
+        let frames = parse_ico(ICON_BYTES).expect("embedded icon parses");
+        let sizes: Vec<usize> = frames.iter().map(|f| f.size).collect();
+
+        // Windows asks for 16 at 100% and 24 at 150%. Both must be present as
+        // exact frames, or the shell resamples a neighbour and the icon goes soft.
+        for want in [16, 24, 32] {
+            assert!(
+                sizes.contains(&want),
+                "no exact {want}px frame, only {sizes:?}"
+            );
+        }
+        assert!(sizes.contains(&256), "no 256px frame for the installer");
+
+        // The 256px frame is stored with a zero width byte; make sure that was
+        // decoded back to 256 rather than left as 0.
+        assert!(!sizes.contains(&0), "a 256px frame decoded as 0: {sizes:?}");
+    }
+
+    #[test]
+    fn every_frame_points_inside_the_file() {
+        for f in parse_ico(ICON_BYTES).expect("embedded icon parses") {
+            assert!(
+                f.offset + f.len <= ICON_BYTES.len(),
+                "frame {f:?} runs past the end of the blob"
+            );
+            assert!(f.len > 0, "frame {f:?} is empty");
+        }
+    }
+
+    #[test]
+    fn frame_selection_never_upscales_when_an_exact_one_exists() {
+        let frames = [
+            IconFrame {
+                size: 16,
+                offset: 0,
+                len: 10,
+            },
+            IconFrame {
+                size: 24,
+                offset: 10,
+                len: 10,
+            },
+            IconFrame {
+                size: 32,
+                offset: 20,
+                len: 10,
+            },
+        ];
+        assert_eq!(pick_frame(&frames, 16).map(|f| f.size), Some(16));
+        assert_eq!(pick_frame(&frames, 17).map(|f| f.size), Some(24));
+        assert_eq!(pick_frame(&frames, 24).map(|f| f.size), Some(24));
+        // 30 is not available, so the next size up is used rather than a downscale.
+        assert_eq!(pick_frame(&frames, 30).map(|f| f.size), Some(32));
+        // Past the largest frame, the largest is better than nothing.
+        assert_eq!(pick_frame(&frames, 512).map(|f| f.size), Some(32));
+    }
+
+    #[test]
+    fn a_malformed_icon_is_rejected_rather_than_trusted() {
+        assert!(parse_ico(&[]).is_err(), "empty blob");
+        assert!(parse_ico(&[0, 0, 0, 0, 0, 0]).is_err(), "truncated header");
+        // Type 2 is a cursor, not an icon.
+        assert!(parse_ico(&[0, 0, 2, 0, 0, 0]).is_err(), "not an icon");
+        // A valid header claiming a frame that runs past the end.
+        let mut lying = vec![0u8; 6];
+        lying[2] = 1;
+        lying[4] = 1;
+        lying.extend_from_slice(&[16, 16, 0, 0, 1, 0, 32, 0]);
+        lying.extend_from_slice(&u32::MAX.to_le_bytes());
+        lying.extend_from_slice(&0u32.to_le_bytes());
+        assert!(parse_ico(&lying).is_err(), "frame past the end of the blob");
+    }
+
+    #[test]
+    fn win32_accepts_the_embedded_icon() {
+        // The tests above only prove the directory is well formed. This one goes
+        // through the whole path: real bytes, real `CreateIconFromResourceEx`, real
+        // `GetIconInfo`. If a future edit corrupts the .ico, or the frames stop
+        // being PNG-compressed, this fails here rather than as an invisible tray
+        // entry that nobody notices until they go looking for the app.
+        if cfg!(not(windows)) {
+            return;
+        }
+
+        let icon = load_icon().expect("Win32 builds an icon from the embedded bytes");
+        unsafe {
+            let mut info = ICONINFO::default();
+            GetIconInfo(icon, &mut info).expect("GetIconInfo accepts the icon");
+            assert!(!info.hbmColor.is_invalid(), "the icon has no colour bitmap");
+            let _ = DestroyIcon(icon);
+        }
+    }
 
     #[test]
     fn command_ids_round_trip() {

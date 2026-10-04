@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="TEAvault">
+  <!--
+    TEAvault mark: a vault door.
+
+    Colours are TEAui's own theme tokens, read out of
+    @tea-ui/core@1.0.0/dist/styles.css rather than eyeballed, so the icon cannot
+    drift away from the interface it ships with. (The token names are written
+    without their leading hyphens: XML forbids a double hyphen inside a comment.)
+
+      tea.canvas  #111318   background
+      tea.accent  #f2c012   the door
+
+    ## Drawn for 16px first
+
+    This shape has to survive being 16x16 in the system tray, which is where the
+    user sees it most. That rules out the details a vault illustration would
+    normally carry: hinges, bolts, a bevel, a shadow. Three elements are left —
+    an outer ring, a cross of spokes, a solid hub — and at 16px the spokes merge
+    into a single cross inside a ring, which is the shape the name evokes.
+
+    Everything is stroked or filled, never a hairline: below roughly 24px a stroke
+    under 16 user units rounds to zero and the element disappears. The ring is
+    44 units and the spokes 40, which is about a third of the radius at 16px.
+
+    ## Geometry
+
+    The ring's outer edge lands exactly on 224 from centre, 256 - 32, so the mark
+    is centred in the rounded square with the same 32-unit margin on every side.
+  -->
+  <rect width="512" height="512" rx="112" fill="#111318"/>
+
+  <g fill="none" stroke="#f2c012" stroke-width="44">
+    <!-- The door itself. -->
+    <circle cx="256" cy="256" r="180"/>
+  </g>
+
+  <!--
+    The handle: a cross of spokes from the hub out to just inside the ring. Kept
+    short of the ring rather than touching it, because a spoke meeting the ring
+    fuses the two into one blob at small sizes and the wheel stops reading as a
+    wheel.
+  -->
+  <g fill="#f2c012">
+    <rect x="98" y="236" width="316" height="40" rx="20"/>
+    <rect x="236" y="98" width="40" height="316" rx="20"/>
+  </g>
+
+  <!-- Hub. Drawn last so it covers the spoke ends and reads as one solid centre. -->
+  <circle cx="256" cy="256" r="54" fill="#f2c012"/>
+</svg>

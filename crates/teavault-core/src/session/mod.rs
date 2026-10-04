@@ -1,4 +1,4 @@
-//! Unlock, lock, auto-lock and failed-attempt limiting.
+//! Unlock, lock, and failed-attempt limiting.
 //!
 //! ## What a session holds
 //!
@@ -15,15 +15,15 @@
 //! passphrase barrier. This is the reason DPAPI is used *only* for the audit
 //! chain key — see [`crate::audit::AuditKeyRing`].
 //!
-//! ## Auto-lock without polling
+//! ## There is no auto-lock
 //!
-//! [`Session::seconds_until_auto_lock`] is a pure function of the last activity
-//! timestamp. The daemon evaluates it when it already has a reason to wake —
-//! on a request, on a tray click, on the session-notification message. Nothing
-//! wakes up on a timer to check, so an idle vault costs no CPU at all. The
-//! consequence is that auto-lock fires at the *next* event rather than to the
-//! millisecond, which for a vault is harmless: nothing can be read between two
-//! events.
+//! An earlier design locked the vault after an idle timeout. It is gone, and
+//! deliberately so: a timer cannot be reconciled with the rule that an idle
+//! vault costs nothing, because honouring it means either a background thread
+//! that wakes up to check or a window in which the key outlives the timeout.
+//! Both are worse than not having the feature. Locking is therefore explicit —
+//! [`Session::lock`] — and a restart is the backstop. Nothing here reads a
+//! clock to decide whether to lock, so there is no idle path left to audit.
 
 use std::time::{Duration, Instant};
 
@@ -31,7 +31,6 @@ use crate::{
     crypto::keyring::Keyring,
     crypto::secret::SecretBytes,
     error::{DenyReason, Error, Result},
-    settings::AutoLock,
 };
 
 /// Consecutive wrong-passphrase attempts before the vault refuses to even try.
@@ -51,8 +50,6 @@ pub struct Session {
     dek: Option<SecretBytes>,
     /// When the session was opened.
     opened_at: Option<Instant>,
-    /// Monotonic clock value of the last activity, for auto-lock arithmetic.
-    last_activity: Option<Instant>,
     /// When the last failed attempt happened, for lockout.
     failed_attempts: u32,
     locked_out_until: Option<Instant>,
@@ -70,7 +67,6 @@ impl Session {
         Self {
             dek: None,
             opened_at: None,
-            last_activity: None,
             failed_attempts: 0,
             locked_out_until: None,
         }
@@ -115,9 +111,7 @@ impl Session {
                 self.failed_attempts = 0;
                 self.locked_out_until = None;
                 self.dek = Some(dek);
-                let now = Instant::now();
-                self.opened_at = Some(now);
-                self.last_activity = Some(now);
+                self.opened_at = Some(Instant::now());
                 Ok(())
             }
             Err(e) => {
@@ -136,57 +130,15 @@ impl Session {
         }
     }
 
-    /// Lock, wiping the data key.
+    /// Lock, wiping the data key. Explicit — the only way out of `unlocked`
+    /// other than dropping the session.
     pub fn lock(&mut self) -> bool {
         let was_unlocked = self.dek.is_some();
         if let Some(mut k) = self.dek.take() {
             k.wipe_now();
         }
         self.opened_at = None;
-        self.last_activity = None;
         was_unlocked
-    }
-
-    /// Record that the user did something, resetting the idle timer.
-    pub fn touch(&mut self) {
-        if self.is_unlocked() {
-            self.last_activity = Some(Instant::now());
-        }
-    }
-
-    /// Whether the idle timeout has elapsed.
-    pub fn should_auto_lock(&self, auto_lock: &AutoLock) -> bool {
-        if !self.is_unlocked() {
-            return false;
-        }
-        let Some(timeout) = auto_lock.seconds() else {
-            return false;
-        };
-        match self.last_activity {
-            Some(t) => t.elapsed() >= Duration::from_secs(timeout),
-            // Unlocked with no recorded activity should not linger forever.
-            None => true,
-        }
-    }
-
-    /// Lock if the idle timeout has elapsed. Returns whether it locked.
-    pub fn auto_lock_if_due(&mut self, auto_lock: &AutoLock) -> bool {
-        if self.should_auto_lock(auto_lock) {
-            self.lock();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Remaining idle time, for the UI countdown. `None` when not applicable.
-    pub fn seconds_until_auto_lock(&self, auto_lock: &AutoLock) -> Option<u64> {
-        if !self.is_unlocked() {
-            return None;
-        }
-        let timeout = auto_lock.seconds()?;
-        let elapsed = self.last_activity.map(|t| t.elapsed()).unwrap_or_default();
-        Some(timeout.saturating_sub(elapsed.as_secs()))
     }
 
     /// Refuse everything while locked, with the reason that is actually true.
@@ -307,68 +259,6 @@ mod tests {
         // their attempts.
         let err = s.unlock(&kr, PASS).unwrap_err();
         assert_eq!(err.code(), "attempts_exhausted");
-    }
-
-    #[test]
-    fn auto_lock_fires_once_the_timeout_has_elapsed_and_locks_the_vault() {
-        let kr = keyring();
-        let mut s = Session::new();
-        s.unlock(&kr, PASS).unwrap();
-
-        // A timeout that has certainly passed. Settings validation rejects a
-        // 0-second timeout as a *user-facing* value, but the session has to
-        // behave correctly for any timeout it is handed, so it is tested here.
-        assert!(s.should_auto_lock(&AutoLock::AfterSeconds(0)));
-        assert!(s.auto_lock_if_due(&AutoLock::AfterSeconds(0)));
-        assert!(
-            !s.is_unlocked(),
-            "auto-lock must actually lock, not just report"
-        );
-    }
-
-    #[test]
-    fn auto_lock_does_not_fire_before_the_timeout() {
-        let kr = keyring();
-        let mut s = Session::new();
-        s.unlock(&kr, PASS).unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-
-        let soon = AutoLock::AfterSeconds(60);
-        assert!(!s.should_auto_lock(&soon));
-        assert!(!s.auto_lock_if_due(&soon));
-        assert!(s.is_unlocked());
-    }
-
-    #[test]
-    fn auto_lock_never_fires_when_the_user_disabled_it() {
-        let kr = keyring();
-        let mut s = Session::new();
-        s.unlock(&kr, PASS).unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        assert!(!s.should_auto_lock(&AutoLock::Never));
-        assert!(!s.auto_lock_if_due(&AutoLock::Never));
-        assert!(s.is_unlocked());
-    }
-
-    #[test]
-    fn touching_resets_the_idle_timer() {
-        let kr = keyring();
-        let mut s = Session::new();
-        s.unlock(&kr, PASS).unwrap();
-        std::thread::sleep(Duration::from_millis(30));
-        s.touch();
-        let one_second = AutoLock::AfterSeconds(10);
-        assert!(s
-            .seconds_until_auto_lock(&one_second)
-            .map(|s| s >= 9)
-            .unwrap_or(false));
-    }
-
-    #[test]
-    fn the_idle_countdown_is_none_while_locked() {
-        let s = Session::new();
-        assert_eq!(s.seconds_until_auto_lock(&AutoLock::AfterSeconds(60)), None);
-        assert!(!s.should_auto_lock(&AutoLock::AfterSeconds(1)));
     }
 
     #[test]

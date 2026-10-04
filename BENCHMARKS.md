@@ -83,15 +83,12 @@ in the OS:
   not woken at all.
 
 There is no polling loop, no timer thread, no periodic vault scan, and no
-auto-lock timer. Auto-lock is a pure function of the last-activity timestamp,
-evaluated when the daemon already has a reason to wake — which means it fires at
-the *next event* rather than exactly on time. For a vault that is harmless:
-nothing can be read between two events, and an idle vault costs nothing to keep
-locked.
+auto-lock. Locking is explicit, which is why there is nothing here to make
+cheap: the daemon never has to ask whether a deadline passed.
 
 The one timer in the product is a one-second `setInterval` in the **UI**, counting
-down the auto-lock timer for display. It reads a number the daemon computed and
-decides nothing.
+down the clipboard clear deadline for display. It reads a number the daemon
+computed and decides nothing.
 
 ## A bug this benchmark found
 

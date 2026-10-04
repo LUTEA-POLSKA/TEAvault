@@ -124,7 +124,7 @@ of dependencies.
 | deny beats allow | revocation actually revokes | re-approving needs two operations |
 | UI has no authority | a compromised frontend cannot widen access | one process hop on every action |
 | path-based owner tier | accidental exposure impossible; a copied binary refused | **not** identity proof; see A2 |
-| no timer for auto-lock | zero idle cost | auto-lock fires at the next event, not exactly on time |
+| explicit locking only, no idle timeout | zero idle cost, no fuzzy deadline | an unlocked vault stays open until the user locks it |
 | audit hash-chained | deletion and in-place edits detectable | **not** tamper-proof against a same-user attacker |
 | DPAPI on the audit key only | account-bound log integrity | relies on DPAPI, which the same-user attacker can also call |
 | 64 KiB request cap | bounds what a hostile client can make the daemon allocate | none in practice |

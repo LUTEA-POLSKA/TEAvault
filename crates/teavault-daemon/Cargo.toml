@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "TEAvault background process: tray, event-driven named-pipe server, auto-lock."
+description = "TEAvault background process: tray, event-driven named-pipe server, conditional clipboard clearing."
 
 [lib]
 name = "teavault_daemon"

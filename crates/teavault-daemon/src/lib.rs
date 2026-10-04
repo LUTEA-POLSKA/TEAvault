@@ -5,6 +5,7 @@
 //! tray icon. The binary does argument handling and the message loop; everything
 //! testable is here.
 
+pub mod audit_key;
 pub mod clipboard;
 pub mod pipe;
 pub mod server;

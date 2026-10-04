@@ -419,8 +419,6 @@ pub struct StatusResult {
     pub entry_count: usize,
     pub pending_approvals: usize,
     pub protocol: u32,
-    /// Seconds until auto-lock, or `null` when not applicable.
-    pub auto_lock_in: Option<u64>,
     pub kdf: String,
 }
 

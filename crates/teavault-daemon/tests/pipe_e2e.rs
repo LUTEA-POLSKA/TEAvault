@@ -26,9 +26,26 @@ use teavault_core::{
     paths::VaultPaths,
     Vault,
 };
-use teavault_daemon::{pipe::PIPE_NAME, server::serve_forever, Shared};
+use teavault_daemon::{server::serve_pipe_named, Shared};
 
 const PASS: &[u8] = b"an e2e test passphrase";
+
+/// The pipe this test binary owns.
+///
+/// The production name is one fixed string, and a suite that shared it collided
+/// with any `teavaultd` the developer happened to be running: the test server
+/// attached to the real daemon's instances and every assertion was then made
+/// against a completely different vault. The symptom was eleven failures with
+/// `left == right` and nothing pointing at the cause, and a developer naturally
+/// reads that as a regression in the code rather than as a port already in use.
+///
+/// A per-process name removes the collision outright. Nothing under test depends
+/// on the name: the ACL, the framing and the protocol are all unaffected by it.
+fn test_pipe() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| format!(r"\\.\pipe\teavault-test-{}", std::process::id()))
+        .as_str()
+}
 
 /// An entry no test ever grants, so refusal tests do not depend on test order.
 const NEVER_GRANTED: &str = "NEVER_GRANTED_API_KEY";
@@ -108,10 +125,11 @@ fn lock_server() -> (Arc<Shared>, MutexGuard<'static, ()>) {
         ));
 
         let shared = Arc::new(Shared::new(vault, owner, Arc::new(MemoryClipboard::new())));
-        serve_forever(
+        serve_pipe_named(
             Arc::clone(&shared),
             std::process::id(),
             exe.to_string_lossy().to_string(),
+            test_pipe(),
         );
         shared
     });
@@ -130,14 +148,7 @@ fn connect() -> TestClient {
             }
         }
     }
-    // The pipe name is global, so a real `teavaultd` running alongside the tests
-    // makes this suite fail with a bare timeout. Say so, rather than leaving a
-    // developer to guess.
-    panic!(
-        "could not connect to {PIPE_NAME} after 3s: {last}\n\
-         \x20 Another TEAvault daemon is probably already running and holding the\n\
-         \x20 pipe. Quit it (tray icon, or `Stop-Process -Name teavaultd`) and re-run."
-    );
+    panic!("could not connect to {} after 3s: {last}", test_pipe());
 }
 
 /// A blocking pipe client, mirroring what the CLI does.
@@ -155,7 +166,10 @@ impl TestClient {
             },
         };
         unsafe {
-            let name: Vec<u16> = PIPE_NAME.encode_utf16().chain(std::iter::once(0)).collect();
+            let name: Vec<u16> = test_pipe()
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
             let handle = CreateFileW(
                 PCWSTR(name.as_ptr()),
                 PIPE_ACCESS_DUPLEX.0,
@@ -171,21 +185,41 @@ impl TestClient {
     }
 
     fn send_raw(&self, line: &str) -> String {
+        self.try_send_raw(line).expect("write request")
+    }
+
+    /// Send and read, reporting a broken pipe as an error rather than a panic.
+    ///
+    /// Needed by the oversized-message tests: the daemon closing the connection is
+    /// the *correct* response to a message past the cap, so the client's write
+    /// failing is the expected outcome rather than a test failure.
+    fn try_send_raw(&self, line: &str) -> std::io::Result<String> {
         let mut bytes = line.as_bytes().to_vec();
         bytes.push(b'\n');
-        let file = std::fs::File::from(unsafe {
-            std::os::windows::io::OwnedHandle::from_raw_handle(self.handle.0)
-        });
-        let mut writer = &file;
-        writer.write_all(&bytes).expect("write request");
-        writer.flush().expect("flush");
+        // Borrow the handle, never own it: `TestClient::drop` closes it. The
+        // previous version took an `OwnedHandle` and only `mem::forget`-ed it on
+        // the success path, so every panic closed the pipe here *and* again in
+        // `Drop` — and a double `CloseHandle` can land on a recycled handle that
+        // belongs to something else entirely.
+        let file =
+            std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(self.handle.0) });
+        let mut file = file;
+        {
+            let writer = &mut *file;
+            writer.write_all(&bytes)?;
+            writer.flush()?;
+        }
 
-        let mut reader = BufReader::new(&file);
+        let mut reader = BufReader::new(&mut *file);
         let mut response = String::new();
-        let n = reader.read_line(&mut response).expect("read response");
-        assert!(n > 0, "the daemon closed the connection without answering");
-        std::mem::forget(file);
-        response.trim_end_matches(['\r', '\n']).to_string()
+        let n = reader.read_line(&mut response)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the daemon closed the connection without answering",
+            ));
+        }
+        Ok(response.trim_end_matches(['\r', '\n']).to_string())
     }
 
     fn send(&self, req: Request) -> Result<serde_json::Value, teavault_core::ipc::ErrorBody> {
@@ -210,6 +244,165 @@ impl Drop for TestClient {
 
 fn send(op: Operation) -> Result<serde_json::Value, teavault_core::ipc::ErrorBody> {
     connect().send(Request::new("t", op))
+}
+
+// ------------------------------------------------------------- concurrency
+
+/// The regression this section exists for.
+///
+/// A connection is a session, and the desktop UI holds one for its whole
+/// lifetime. The accept loop used to serve each connection *inline*, so while the
+/// UI was open the loop was busy inside its session loop and no other client
+/// could be served at all. `MAX_INSTANCES = 8` advertised eight connections while
+/// only one was ever reachable.
+///
+/// The user-visible symptom is severe and easy to misread: with the UI open, an
+/// agent's `request` hangs, while the same command from the same agent works
+/// perfectly once the window is closed. It looks like a permissions problem, or
+/// like the vault being locked, and neither is true.
+#[test]
+fn a_held_ui_connection_does_not_block_any_other_client() {
+    let (_shared, _guard) = lock_server();
+
+    // Stand in for the UI: one long-lived session that stays open throughout.
+    let ui = connect();
+    for _ in 0..5 {
+        let out = ui
+            .send(Request::new("ui", Operation::Status))
+            .expect("ui status");
+        assert_eq!(out["locked"], false);
+    }
+
+    // The CLI/agent client must be served *now*, not after the UI disconnects.
+    let agent = connect();
+    let t0 = std::time::Instant::now();
+    let out = agent
+        .send(Request::new("agent", Operation::Status))
+        .expect("a second client must be served while the first is connected");
+    let elapsed = t0.elapsed();
+
+    assert_eq!(out["locked"], false);
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the second client waited {elapsed:?} — it is queued behind the UI session"
+    );
+
+    // And it can keep talking, which also proves the pipe instance was not closed
+    // after a single exchange.
+    let out = agent
+        .send(Request::new("agent", Operation::List { provider: None }))
+        .expect("the second client must keep its session");
+    assert!(out["entries"].is_array());
+
+    // The UI is unaffected by the second client being served.
+    let out = ui
+        .send(Request::new("ui", Operation::Status))
+        .expect("ui still alive");
+    assert_eq!(out["locked"], false);
+}
+
+#[test]
+fn several_clients_are_served_at_the_same_time() {
+    let (_shared, _guard) = lock_server();
+
+    // Five clients connect and stay connected, each issuing a request. The point
+    // is not that they all succeed — that much is covered above — but that none
+    // of them waits for another to finish.
+    let mut held = Vec::new();
+    for _ in 0..5 {
+        let c = connect();
+        c.send(Request::new("warmup", Operation::Status))
+            .expect("warmup");
+        held.push(c);
+    }
+
+    let started = std::time::Instant::now();
+    for (i, c) in held.iter().enumerate() {
+        let out = c
+            .send(Request::new(format!("c{i}"), Operation::Status))
+            .unwrap_or_else(|e| panic!("client {i} was not served: {}", e.message));
+        assert_eq!(out["locked"], false, "client {i} got the wrong answer");
+    }
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "five simultaneous clients took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(held.len(), 5);
+}
+
+#[test]
+fn a_client_that_disconnects_mid_session_does_not_affect_the_others() {
+    let (_shared, _guard) = lock_server();
+
+    let stay = connect();
+    stay.send(Request::new("a", Operation::Status))
+        .expect("first");
+
+    // A client that opens a connection and drops it without ever sending
+    // anything. The connection thread has to notice and release its pipe slot.
+    let ghost = connect();
+    drop(ghost);
+
+    let out = stay
+        .send(Request::new("b", Operation::Status))
+        .expect("a silent disconnect must not disturb anyone");
+    assert_eq!(out["locked"], false);
+}
+
+#[test]
+fn an_oversized_message_is_refused_without_disturbing_the_daemon() {
+    let (_shared, _guard) = lock_server();
+
+    // Far past the 64 KiB cap, and deliberately without a trailing newline for
+    // the first half: a client that never terminates its message must not be able
+    // to make the daemon buffer without bound. The bounded reader refuses and
+    // drops the connection.
+    let hostile = connect();
+    let mut huge = String::with_capacity(4 * 1024 * 1024);
+    while huge.len() < 4 * 1024 * 1024 {
+        huge.push_str(&"x".repeat(1024));
+    }
+    // A failure here is the expected outcome: the daemon reads the cap, refuses
+    // and closes. What matters is that it did so instead of buffering 4 MiB.
+    let _ = hostile.try_send_raw(&huge);
+
+    // The daemon has to still be serving.
+    let out = send(Operation::Status).expect("the daemon must survive an oversized message");
+    assert_eq!(out["locked"], false);
+}
+
+#[test]
+fn an_oversized_message_does_not_desynchronise_the_stream() {
+    let (_shared, _guard) = lock_server();
+
+    // Two lines in one write, the first over the cap. If the daemon consumed only
+    // the first line's worth and kept reading, the tail of the oversized line
+    // would be parsed as the *next* request — so a hostile client could get TEAvault
+    // to execute a request it never sent as a complete message.
+    let c = connect();
+    let mut line = String::from(r#"{"v":1,"id":"evil","op":"status","pad":""#);
+    while line.len() < 200 * 1024 {
+        line.push('A');
+    }
+    line.push_str(r#""}"#);
+    let tail = r#"{"v":1,"id":"real","op":"status"}"#;
+    let response = c.try_send_raw(&format!("{line}\n{tail}"));
+
+    // Whatever came back, it must not be the answer to `real`. A broken pipe is
+    // the expected result — the connection is meant to be closed — but if a
+    // response did arrive it must not be the hidden request.
+    if let Ok(response) = response {
+        assert!(
+            !response.contains(r#""id":"real""#),
+            "a request hidden inside an oversized line was executed: {response}"
+        );
+    }
+
+    // And the daemon is still healthy for everyone else.
+    let out = send(Operation::Status).expect("the daemon must still serve");
+    assert_eq!(out["locked"], false);
 }
 
 #[test]
@@ -437,7 +630,27 @@ fn a_denied_entry_disappears_from_listing_for_that_client() {
     // own entry: a denied entry is not listed, so a deny on a shared entry
     // silently changes what every other test sees. This test pins that
     // behaviour *and* proves the shared entries are unaffected.
-    let (_shared, _guard) = lock_server();
+    //
+    // The deny is set up here rather than relied upon from
+    // `a_denied_client_is_refused_even_with_an_earlier_grant`. These tests share
+    // one server and run in parallel, so depending on a sibling's side effect
+    // made this test a race: it passed only when the deny happened to be applied
+    // first, and reported a real regression when the order changed. Applying the
+    // same deny twice is idempotent, so stating the precondition costs nothing.
+    let (shared, _guard) = lock_server();
+    let identity = teavault_core::model::ClientIdentity::new(
+        std::process::id(),
+        std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+    );
+    let entry_id = shared.with_vault(|v| v.resolve_entry_id(DENIED).expect("entry id"));
+    shared.with_vault(|v| {
+        v.grant_for_fingerprint(&entry_id, &identity.fingerprint(), "test", GrantMode::Deny)
+            .expect("deny");
+    });
+
     let out = send(Operation::List { provider: None }).expect("list");
     let text = out.to_string();
     assert!(!text.contains(DENIED), "a denied entry must not be listed");

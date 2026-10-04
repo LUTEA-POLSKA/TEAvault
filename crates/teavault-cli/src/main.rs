@@ -354,10 +354,6 @@ fn print_status(out: &serde_json::Value) {
     );
     println!("protocol:     {}", out["protocol"].as_u64().unwrap_or(0));
     println!("kdf:          {}", out["kdf"].as_str().unwrap_or("-"));
-    match out["auto_lock_in"].as_u64() {
-        Some(secs) => println!("auto-lock in: {secs}s"),
-        None => println!("auto-lock:    not applicable"),
-    }
 }
 
 fn print_list(out: &serde_json::Value) {

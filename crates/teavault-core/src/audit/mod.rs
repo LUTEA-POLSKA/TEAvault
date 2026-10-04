@@ -15,24 +15,44 @@
 //!
 //! ## Integrity
 //!
-//! Events are hash-chained: each entry carries the SHA-256 of the previous
-//! entry plus its own payload, so removing or editing an earlier event breaks
-//! every later link. The chain key is a random 32-byte value wrapped with
-//! Windows DPAPI, which binds the log to the user account *without* weakening
-//! the passphrase barrier — see [`dpapi_key`].
+//! Two independent mechanisms, and it is worth being precise about what each one
+//! buys:
 //!
-//! **Stated plainly: this is tamper-evidence, not tamper-proofing.** An
-//! attacker with full control of the user account can also call DPAPI, rewrite
-//! the whole file and recompute the chain. What the chain does buy is that
-//! casual truncation, accidental deletion and offline editing with a text
-//! editor are detected, and it gives an investigator a chain it can check.
+//! * A **SHA-256 hash chain.** Each entry carries the digest of the previous
+//!   entry plus its own payload, so removing, reordering or editing any earlier
+//!   event breaks every later link, and truncation leaves a head that does not
+//!   match. This works with no key material at all.
+//! * An **HMAC over the same payload**, using a random 32-byte chain key stored
+//!   under Windows DPAPI. The hash chain alone is defeated by anyone who simply
+//!   recomputes it — the digests are not secret. The MAC is what catches a
+//!   wholesale rewrite by a process that can edit the file but cannot unwrap
+//!   the key.
+//!
+//! The MAC is only real when a [`ChainKeyProtector`] is installed and the key
+//! survives a restart. Without one, [`AuditLog::is_mac_backed`] is `false` and
+//! callers are expected to say so rather than imply the stronger guarantee.
+//!
+//! **Stated plainly: this is tamper-evidence, not tamper-proofing.** An attacker
+//! who fully controls the user account can call DPAPI, rewrite the file and
+//! recompute both chain and MAC. What the pair does buy is that casual
+//! truncation, accidental deletion, offline editing with a text editor, and
+//! scripted rewriting are all detected, and an investigator gets a chain they
+//! can check.
+//!
+//! ## Not a plaintext-free log
+//!
+//! `audit.log` is written in the clear, because an audit log an investigator
+//! cannot read without the vault passphrase would be close to useless. It
+//! therefore does *not* contain secrets — the event types are structurally
+//! incapable of that — but it does contain key names and client identity
+//! strings. Client fingerprints are shortened by
+//! [`crate::vault::shorten_identity`] before they are written for exactly this
+//! reason. See `SECURITY.md` for what that does and does not hide.
 //!
 //! ## Backups
 //!
-//! The log ships *inside* the encrypted export, so it travels with the data it
-//! describes. It is excluded from any plaintext path — there is none.
-//!
-//! [`dpapi_key`]: crate::audit::AuditKeyRing
+//! The log ships inside the encrypted export, so it travels with the data it
+//! describes.
 
 use serde::{Deserialize, Serialize};
 
@@ -153,16 +173,22 @@ pub struct AuditEvent {
 }
 
 impl AuditEvent {
-    /// The bytes covered by the MAC: everything except the MAC itself.
+    /// The bytes covered by the MAC and the chain link.
     ///
-    /// Field order is fixed by the struct definition, so a re-serialisation is
-    /// byte-identical. If the format ever needs a change, bump
-    /// `PROTOCOL_VERSION` rather than reordering fields silently.
-    #[allow(dead_code)]
-    fn mac_payload(&self) -> Result<Vec<u8>> {
+    /// `prev_chain || '|' || json(event with an empty mac)`. Deliberately lives
+    /// here rather than on the struct so there is exactly one definition: an
+    /// earlier version had a second, subtly different copy on `AuditEvent` that
+    /// omitted `prev_chain`, which is the kind of divergence that makes a
+    /// verifier compute the wrong digest while looking correct.
+    pub fn link_payload(&self) -> Result<Vec<u8>> {
         let mut core = self.clone();
         core.mac = String::new();
-        Ok(serde_json::to_vec(&core)?)
+        let body = serde_json::to_vec(&core)?;
+        let mut buf = Vec::with_capacity(self.prev_chain.len() + 1 + body.len());
+        buf.extend_from_slice(self.prev_chain.as_bytes());
+        buf.push(b'|');
+        buf.extend_from_slice(&body);
+        Ok(buf)
     }
 }
 
@@ -222,11 +248,51 @@ impl PendingApproval {
 /// with DPAPI would hand it to every process running as the user and destroy
 /// the passphrase barrier entirely. This wraps only the log's HMAC key, which
 /// protects nothing confidential.
+/// Protects the audit chain key at rest.
+///
+/// A trait rather than a direct DPAPI call because the core crate denies
+/// `unsafe_code`, and because the guarantee is platform-specific: the daemon
+/// installs a DPAPI-backed implementation on Windows, and anything else gets
+/// [`NoChainKeyProtection`] and an honestly unbacked log.
+///
+/// Binding the chain key to the account is what makes the MAC meaningful without
+/// touching the passphrase barrier: DPAPI can only unwrap for the user whose
+/// account produced the blob, whereas the vault's data key requires the
+/// passphrase. The two are deliberately kept independent.
+pub trait ChainKeyProtector: Send + Sync {
+    /// Wrap `key` for storage. The output is opaque to the core.
+    fn protect(&self, key: &[u8]) -> Result<Vec<u8>>;
+
+    /// Unwrap a value produced by [`Self::protect`].
+    fn unprotect(&self, blob: &[u8]) -> Result<Vec<u8>>;
+}
+
+/// The protector used when the platform offers none.
+///
+/// It stores nothing, so the chain key cannot survive a restart and the log
+/// falls back to a bare hash chain. [`AuditLog::is_mac_backed`] reports `false`
+/// and `AuditKeyRing::protected_key` is empty, so the weaker guarantee is
+/// visible rather than implied.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoChainKeyProtection;
+
+impl ChainKeyProtector for NoChainKeyProtection {
+    fn protect(&self, _key: &[u8]) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+    fn unprotect(&self, _blob: &[u8]) -> Result<Vec<u8>> {
+        Ok(Vec::new())
+    }
+}
+
+/// The chain key's state on disk, alongside the head.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditKeyRing {
     pub format_version: u32,
-    /// Base64-free hex of the DPAPI-protected chain key. Empty on platforms
-    /// without DPAPI, where the chain is still detectable but not account-bound.
+    /// Hex of the protected chain key.
+    ///
+    /// Empty when no [`ChainKeyProtector`] is installed — which is a real, weaker
+    /// state and is reported rather than papered over.
     pub protected_key: String,
     /// The chain head at the time of writing, so a truncated file is detectable
     /// even before any verification pass.
@@ -235,13 +301,19 @@ pub struct AuditKeyRing {
 }
 
 impl AuditKeyRing {
-    pub fn genesis() -> Self {
+    /// A fresh keyring for a log that has not been written yet.
+    pub fn genesis(protected_key: Vec<u8>) -> Self {
         Self {
             format_version: crate::PROTOCOL_VERSION,
-            protected_key: String::new(),
+            protected_key: crate::crypto::hex::encode(&protected_key),
             chain_head: GENESIS.to_string(),
             last_seq: 0,
         }
+    }
+
+    /// Whether a usable protected key is present.
+    pub fn has_key(&self) -> bool {
+        !self.protected_key.is_empty()
     }
 }
 
@@ -260,6 +332,9 @@ pub struct AuditLog {
     chain_head: String,
     last_seq: u64,
     key: Option<crate::crypto::secret::SecretBytes>,
+    /// Whether `chain_head` came from the keyring file rather than from the
+    /// events themselves. See [`AuditLog::from_storage`].
+    head_trusted: bool,
 }
 
 impl Default for AuditLog {
@@ -269,6 +344,7 @@ impl Default for AuditLog {
             chain_head: GENESIS.to_string(),
             last_seq: 0,
             key: None,
+            head_trusted: true,
         }
     }
 }
@@ -292,7 +368,54 @@ impl AuditLog {
             chain_head,
             last_seq,
             key,
+            head_trusted: true,
         }
+    }
+
+    /// Rebuild from disk, verifying against a head recorded elsewhere.
+    ///
+    /// `expected_head` is the chain head as stored in the keyring file — a
+    /// *different* file from the log. That separation is the entire detection
+    /// mechanism: someone who edits `audit.log` to hide an event has to edit
+    /// `audit.keyring` too, and the two are not written at the same instant.
+    ///
+    /// Deriving the head from the events instead would make the check
+    /// self-fulfilling — `verify` would compare the log's own last link against a
+    /// value computed from that same log, and could never fail. That was a real
+    /// mistake here: the first version of this function computed the head, and
+    /// the tamper-detection test passed on a log that had been edited.
+    ///
+    /// When `expected_head` is `None` the head cannot be checked, so it is set
+    /// to the computed one and the caller is expected to notice via
+    /// [`AuditLog::head_is_trusted`]. Every other check — sequence continuity,
+    /// links, MACs — still runs.
+    pub fn from_storage(
+        events: Vec<AuditEvent>,
+        expected_head: Option<String>,
+        key: Option<crate::crypto::secret::SecretBytes>,
+    ) -> Result<Self> {
+        let last_seq = events.iter().map(|e| e.seq).max().unwrap_or(0);
+        let computed = Self::restore(events, GENESIS.to_string(), last_seq, key.clone());
+        let head = computed.compute_head()?;
+        let trusted = expected_head.is_some();
+        Ok(Self::restore(
+            computed.into_events(),
+            expected_head.unwrap_or(head),
+            last_seq,
+            key,
+        ))
+        .map(|mut l| {
+            l.head_trusted = trusted;
+            l
+        })
+    }
+
+    /// Whether the chain head was checked against a separately stored value.
+    ///
+    /// `false` means the links and MACs verified but the head was self-computed,
+    /// so a wholesale *truncation* would not have been caught.
+    pub fn head_is_trusted(&self) -> bool {
+        self.head_trusted
     }
 
     pub fn chain_head(&self) -> &str {
@@ -312,6 +435,11 @@ impl AuditLog {
     /// rewrite by a local attacker would not be caught.
     pub fn is_mac_backed(&self) -> bool {
         self.key.is_some()
+    }
+
+    /// The chain key, for persisting it under the protector.
+    pub fn chain_key(&self) -> Option<&[u8]> {
+        self.key.as_ref().map(|k| k.as_slice())
     }
 
     /// Most recent first, for the UI.
@@ -345,14 +473,7 @@ impl AuditLog {
     /// The link material for one event: `prev_chain || payload`, where the
     /// payload is the whole event with an empty `mac`.
     fn mac_payload(&self, e: &AuditEvent) -> Result<Vec<u8>> {
-        let mut core = e.clone();
-        core.mac = String::new();
-        let body = serde_json::to_vec(&core)?;
-        let mut buf = Vec::with_capacity(e.prev_chain.len() + 1 + body.len());
-        buf.extend_from_slice(e.prev_chain.as_bytes());
-        buf.push(b'|');
-        buf.extend_from_slice(&body);
-        Ok(buf)
+        e.link_payload()
     }
 
     /// Returns `(next_chain_head, mac)` for `e`.
@@ -374,14 +495,36 @@ impl AuditLog {
     ///
     /// It cannot detect a wholesale rewrite by someone who recomputed the whole
     /// chain *and* holds the chain key. See the module docs.
+    ///
+    /// ## Why it starts from the first stored event
+    ///
+    /// The walk begins at the first event's own `prev_chain` and `seq`, not at
+    /// `GENESIS` and 1. The log on disk is a bounded window (see
+    /// [`Vault::persist_audit`](crate::vault::Vault)), so its first retained
+    /// event is not seq 1 — and a verifier that insisted on `GENESIS` would
+    /// report a perfectly intact window as truncated. Starting from the first
+    /// stored link verifies exactly what is present, which is what a verifier
+    /// can honestly claim.
     pub fn verify(&self) -> Result<()> {
-        let mut prev = GENESIS.to_string();
+        let Some(first) = self.events.first() else {
+            // An empty log is valid only if it has never had an event.
+            return if self.chain_head == GENESIS {
+                Ok(())
+            } else {
+                Err(Error::Malformed(
+                    "the audit log is empty but records a chain head".into(),
+                ))
+            };
+        };
 
-        for (expected_seq, e) in (1u64..).zip(self.events.iter()) {
-            if e.seq != expected_seq {
+        let mut prev = first.prev_chain.clone();
+
+        for (offset, e) in self.events.iter().enumerate() {
+            let expected = first.seq + offset as u64;
+            if e.seq != expected {
                 return Err(Error::Malformed(format!(
                     "audit sequence jumped from {} to {} — entries were removed",
-                    expected_seq.saturating_sub(1),
+                    expected.saturating_sub(1),
                     e.seq
                 )));
             }
@@ -409,9 +552,35 @@ impl AuditLog {
         Ok(())
     }
 
+    /// The chain head implied by the stored events.
+    ///
+    /// Derived rather than read from the keyring so the value cannot disagree
+    /// with the events it describes.
+    pub fn compute_head(&self) -> Result<String> {
+        let Some(mut prev) = self.events.first().map(|e| e.prev_chain.clone()) else {
+            return Ok(GENESIS.to_string());
+        };
+        for e in &self.events {
+            prev = self.link(e)?.0;
+        }
+        Ok(prev)
+    }
+
     /// Every stored event, cloned out for writing to disk.
     pub fn into_events(self) -> Vec<AuditEvent> {
         self.events
+    }
+
+    /// The most recent `keep` events, oldest first.
+    ///
+    /// Used to bound the file the vault rewrites on every event. The retained
+    /// events keep their original `seq` numbers, so the on-disk sequence has a
+    /// visible gap at the front rather than pretending the log began at 1.
+    pub fn trimmed(&self, keep: usize) -> Vec<AuditEvent> {
+        if self.events.len() <= keep {
+            return self.events.clone();
+        }
+        self.events[self.events.len() - keep..].to_vec()
     }
 }
 

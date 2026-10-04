@@ -113,51 +113,97 @@ pub fn serve_forever(
 ) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name("teavault-pipe".into())
-        .spawn(move || loop {
-            if shared.is_quitting() {
-                return;
-            }
+        .spawn(move || accept_loop(&shared, own_pid, &own_path, pipe::PIPE_NAME))
+        .expect("the pipe thread must start")
+}
 
-            let instance = match PipeInstance::create() {
-                Ok(i) => i,
-                Err(e) => {
-                    eprintln!("teavaultd: pipe: {e}");
-                    // Do not spin on a permanent failure.
-                    thread::sleep(Duration::from_secs(5));
-                    continue;
-                }
-            };
+/// Serve clients on `pipe_name`, on its own thread.
+///
+/// The production path is [`serve_forever`], which owns the well-known
+/// [`pipe::PIPE_NAME`]. This variant exists so an integration test can bind a
+/// private pipe instead of the real one — two servers on one name would mean
+/// the second silently never accepts.
+///
+/// Returns immediately, so a caller that has just built a [`Shared`] does not
+/// block before it can hand that vault over.
+pub fn serve_pipe_named(
+    shared: Arc<Shared>,
+    own_pid: u32,
+    own_path: String,
+    pipe_name: &str,
+) -> thread::JoinHandle<()> {
+    let pipe_name = pipe_name.to_owned();
+    thread::Builder::new()
+        .name("teavault-pipe-test".into())
+        .spawn(move || accept_loop(&shared, own_pid, &own_path, &pipe_name))
+        .expect("the pipe thread must start")
+}
 
-            if instance.connect().is_err() {
+fn accept_loop(shared: &Arc<Shared>, own_pid: u32, own_path: &str, pipe_name: &str) {
+    loop {
+        if shared.is_quitting() {
+            return;
+        }
+
+        let instance = match PipeInstance::create_named(&pipe_name) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("teavaultd: pipe: {e}");
+                // Do not spin on a permanent failure.
+                thread::sleep(Duration::from_secs(5));
                 continue;
             }
+        };
 
-            let caller = match caller_for(&shared, &instance, own_pid, &own_path) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("teavaultd: pipe: {e}");
-                    continue;
-                }
-            };
+        if instance.connect().is_err() {
+            continue;
+        }
 
-            let mut was_copy = false;
-            let served = instance.serve_session(&mut |line| {
-                // A `copy` needs the deadline thread armed. Detected from the
-                // request, because the response deliberately says nothing about
-                // which operation ran.
-                was_copy = request_op(line).as_deref() == Some("copy");
-                shared.with_vault(|v| {
-                    let mut d = Dispatcher::new(v, &shared.owner);
-                    serde_json::to_string(&d.handle_line(&caller, line)).unwrap_or_default()
-                })
-            });
-
-            if served && was_copy {
-                let seconds = shared.with_vault(|v| v.settings().clipboard_clear_seconds);
-                shared.schedule_clear(seconds);
+        let caller = match caller_for(shared, &instance, own_pid, own_path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("teavaultd: pipe: {e}");
+                continue;
             }
+        };
+
+        // One thread per connection. `serve_session` parks for as long as the
+        // client stays connected, so serving it inline would let a single
+        // long-lived client — the UI, which holds its connection open — block
+        // every other client from being accepted at all.
+        let worker_shared = Arc::clone(shared);
+        if thread::Builder::new()
+            .name("teavault-conn".into())
+            .spawn(move || serve_connection(worker_shared, instance, caller))
+            .is_err()
+        {
+            eprintln!("teavaultd: pipe: could not start a worker thread");
+        }
+    }
+}
+
+/// Handle one accepted connection until the client disconnects.
+///
+/// The caller is already resolved and immutable here: the tier came from the
+/// image path the kernel reported, so nothing in this loop can change what this
+/// client is allowed to do.
+fn serve_connection(shared: Arc<Shared>, instance: PipeInstance, caller: Caller) {
+    let mut was_copy = false;
+    let served = instance.serve_session(&mut |line| {
+        // A `copy` needs the deadline thread armed. Detected from the request,
+        // because the response deliberately says nothing about which operation
+        // ran.
+        was_copy = request_op(line).as_deref() == Some("copy");
+        shared.with_vault(|v| {
+            let mut d = Dispatcher::new(v, &shared.owner);
+            serde_json::to_string(&d.handle_line(&caller, line)).unwrap_or_default()
         })
-        .expect("the pipe thread must start")
+    });
+
+    if served && was_copy {
+        let seconds = shared.with_vault(|v| v.settings().clipboard_clear_seconds);
+        shared.schedule_clear(seconds);
+    }
 }
 
 /// The kernel's answer to "who is calling", turned into a caller.

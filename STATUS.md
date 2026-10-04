@@ -48,7 +48,7 @@ rather than leaving a bare timeout.
 | KDF hardening | parameters stored, re-validated on read, floor enforced, downgrade refused |
 | Encrypted storage | atomic writes, fsync, file lock, index sealed separately from secrets |
 | AAD binding | each secret bound to its entry id; replay across contexts fails |
-| Lock / unlock | auto-lock without a timer, attempt counting, lockout that blocks the *correct* passphrase |
+| Lock / unlock | explicit lock, attempt counting, lockout that blocks the *correct* passphrase |
 | Permissions | per client per key, allow-once / always / deny, deny beats allow, expiry, revocation |
 | Discovery control | `list` and `info` cannot return a value, by type |
 | Visibility | discoverable vs hidden, so the inventory is not disclosed by default |

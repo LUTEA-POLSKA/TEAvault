@@ -122,7 +122,13 @@ pub enum Error {
     Invalid { field: &'static str, reason: String },
 
     /// Security-relevant refusal with a machine-readable cause.
-    #[error("access denied: {reason}")]
+    ///
+    /// The detail is part of the message on purpose. It is documented as "free
+    /// text for the audit log and the UI", and an error that reaches the user as
+    /// "access denied: no grant" without saying *which* grant, or *why this
+    /// particular* request is refused, is not a usable explanation — it looks like
+    /// a bug. Branch on the `code`; read the message.
+    #[error("access denied: {reason}: {detail}")]
     Denied {
         reason: DenyReason,
         /// Free-text detail for the audit log and the UI. Never secret.

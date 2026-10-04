@@ -32,9 +32,38 @@ pub const SALT_LEN: usize = 16;
 /// which is the entire difference between a passphrase being expensive to guess
 /// and free.
 pub const MIN_M_COST_KIB: u32 = 8 * 1024;
-/// Highest memory cost accepted. 4 GiB would be a denial of service against
-/// the owner's own machine if a file asked for it.
-pub const MAX_M_COST_KIB: u32 = 4 * 1024 * 1024;
+
+/// Highest memory cost accepted, in KiB. **512 MiB.**
+///
+/// The previous bound was 4 GiB, which is not a security limit but an allocation
+/// budget: a keyring file is untrusted input, and a single tampered byte turns
+/// the owner's next unlock into a request for four gigabytes of committed,
+/// non-paged memory. On a 16 GiB machine that is survivable; on a 8 GiB laptop
+/// running an agent, it is the OOM killer choosing a victim, and TEAvault
+/// holding the request makes it a prime candidate.
+///
+/// 512 MiB is the ceiling because it is generous enough to be a *real* setting —
+/// roughly 25× the default, which is well past anything Argon2id needs to be
+/// secure and is the point at which "more expensive" stops meaning "harder to
+/// crack" and starts meaning "impossible to unlock on this machine". Anything
+/// beyond it is a mistake or an attack, not a configuration.
+///
+/// Raising this means raising [`MAX_T_COST`] awareness too: memory and time
+/// multiply, so `m=512 MiB` with `t=16` is minutes of CPU per unlock.
+pub const MAX_M_COST_KIB: u32 = 512 * 1024;
+
+/// The combined memory x time cost an attacker actually pays.
+///
+/// Two parameters that are each individually in range can still describe an
+/// absurd derivation: `m = 512 MiB` with `t = 16` is sixteen passes over half a
+/// gigabyte, which is minutes of CPU on every single unlock. The individual
+/// bounds cannot catch that, so the product is capped too.
+///
+/// The cap is deliberately loose relative to any real setting — the OWASP
+/// default scores `19456 * 2`, three orders of magnitude below it — so this
+/// only ever excludes combinations nobody would choose on purpose.
+pub const MAX_MEMORY_TIME_PRODUCT: u64 = (MAX_M_COST_KIB as u64) * 4;
+
 /// Bounds on passes and parallelism, for the same reason.
 pub const MIN_T_COST: u32 = 1;
 pub const MAX_T_COST: u32 = 16;
@@ -135,6 +164,18 @@ impl KdfParams {
         }
         if !(MIN_P_COST..=MAX_P_COST).contains(&self.p_cost) {
             return Err(Error::invalid("kdf.p_cost", "out of supported range"));
+        }
+        // The combined cost is what an offline attacker pays. Two parameters that
+        // are each individually in range can still describe an absurd derivation,
+        // and the check has to happen before anything is allocated.
+        let product = self.m_cost_kib as u64 * self.t_cost as u64;
+        if product > MAX_MEMORY_TIME_PRODUCT {
+            return Err(Error::invalid(
+                "kdf.m_cost_kib",
+                format!(
+                    "memory x time of {product} exceeds the supported maximum of {MAX_MEMORY_TIME_PRODUCT}"
+                ),
+            ));
         }
         self.salt_bytes()?;
         Ok(())
@@ -250,6 +291,71 @@ mod tests {
             ..fast()
         };
         assert!(many_threads.validate().is_err());
+    }
+
+    #[test]
+    fn the_memory_ceiling_is_bounded_and_allocatable() {
+        // The number itself, not just that validation rejects things. 4 GiB was
+        // the previous bound, and it is the single most dangerous constant in
+        // this file: it turns one tampered byte into a multi-gigabyte allocation.
+        assert_eq!(MAX_M_COST_KIB, 512 * 1024);
+        assert!(
+            (MAX_M_COST_KIB as u64) < 1024 * 1024,
+            "must stay under 1 GiB"
+        );
+    }
+
+    #[test]
+    fn a_cost_just_inside_the_ceiling_is_accepted() {
+        // A bound that rejects the maximum it documents is a bound nobody can
+        // actually configure. Checked without deriving — allocation is the
+        // expensive part and the range check is what is under test.
+        let at_ceiling = KdfParams {
+            m_cost_kib: MAX_M_COST_KIB,
+            t_cost: 1,
+            ..fast()
+        };
+        assert!(at_ceiling.validate().is_ok());
+    }
+
+    #[test]
+    fn a_cost_just_over_the_ceiling_is_refused_before_allocating() {
+        let over = KdfParams {
+            m_cost_kib: MAX_M_COST_KIB + 1,
+            ..fast()
+        };
+        assert!(over.validate().is_err());
+        // `derive` validates first, so it must refuse without touching Argon2 —
+        // otherwise this test would try to allocate half a gigabyte.
+        assert!(over.derive(b"x", 32).is_err());
+    }
+
+    #[test]
+    fn an_absurd_memory_time_combination_is_refused() {
+        // Each parameter is in range on its own; together they describe minutes of
+        // CPU per unlock. The product check is the only thing standing between a
+        // tampered file and that.
+        let combo = KdfParams {
+            m_cost_kib: MAX_M_COST_KIB,
+            t_cost: MAX_T_COST,
+            ..fast()
+        };
+        let err = combo.validate().unwrap_err();
+        assert_eq!(err.code(), "invalid");
+        assert!(
+            MAX_M_COST_KIB as u64 * MAX_T_COST as u64 > MAX_MEMORY_TIME_PRODUCT,
+            "the ceiling must actually exclude the worst legal pair"
+        );
+    }
+
+    #[test]
+    fn the_owasp_default_is_nowhere_near_the_ceiling() {
+        // Guards the other direction: a future edit that lowers MAX_M_COST_KIB
+        // below the shipped default would lock every existing vault out of its
+        // own unlock path.
+        let p = KdfParams::generate().unwrap();
+        assert!(p.m_cost_kib < MAX_M_COST_KIB / 4);
+        p.validate().unwrap();
     }
 
     #[test]

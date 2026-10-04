@@ -12,18 +12,37 @@
 //! 1. **`PIPE_REJECT_REMOTE_CLIENTS`** — a client on another machine cannot
 //!    connect at all. TEAvault is not a network service and must not become one
 //!    by accident.
-//! 2. **An explicit DACL**, built from SDDL granting the system account full
-//!    access and built-in users read/write. Named pipes are frequently more
-//!    permissive than people assume, so the descriptor is constructed rather
-//!    than inherited.
+//! 2. **An explicit DACL**, built from SDDL rather than inherited. This is the
+//!    layer that keeps other accounts on the machine out.
 //! 3. **Per-operation tier checks** in the dispatcher, keyed on the image path
 //!    the kernel reports.
 //!
+//! ## Why the DACL names a SID rather than `BU`
+//!
+//! The descriptor used to be `D:P(A;;GA;;;SY)(A;;GA;;;BU)` — full access for the
+//! system account and for **every** account on the machine, because `BU` is
+//! BUILTIN\Users. For a credential vault that is far too wide. Any other user
+//! logged into the same Windows installation could open the pipe; the tier check
+//! would stop them from owner operations, but `list` and `info` are agent-tier,
+//! so they could still enumerate the vault's metadata — every provider the owner
+//! holds a key for, by name, and each entry's capabilities.
+//!
+//! The descriptor is therefore built from the **current user's SID**. `SY` stays,
+//! because an elevated daemon has to be reachable from a non-elevated one or the
+//! product breaks after a UAC prompt; the tier check is what stops a second
+//! SYSTEM process from getting anywhere useful.
+//!
+//! This is not a defence against an administrator, and it is not meant to be —
+//! `\\.\pipe\` is a per-session namespace they already own. It is a defence
+//! against the other account on the same desktop, which is the realistic case.
+//!
 //! ## Idle cost
 //!
-//! The server is **blocking**. `ConnectNamedPipe` parks the thread until a
-//! client appears and a read blocks until a line arrives. No poll loop, no
-//! timer thread, no periodic scan.
+//! `ConnectNamedPipe` parks the accept thread until a client appears, and a
+//! connection's read parks until a line arrives. No poll loop, no timer thread,
+//! no periodic scan. Each live connection owns one thread, which is why
+//! `MAX_INSTANCES` is a real bound and not an aspiration — see
+//! [`PipeInstance::serve_session`].
 //!
 //! ## Client identity
 //!
@@ -36,7 +55,7 @@
 
 use std::{
     io::{BufRead, BufReader, Write},
-    os::windows::io::{FromRawHandle, OwnedHandle},
+    os::windows::io::FromRawHandle,
 };
 
 use windows::{
@@ -83,21 +102,115 @@ const OUT_BUFFER: u32 = 16 * 1024;
 const IN_BUFFER: u32 = 16 * 1024;
 
 /// `D:P` makes the DACL protected, so it does not inherit the parent's.
-/// `SY` is the local system account, `BU` built-in users.
-const SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BU)";
+///
+/// Built from the current user's SID rather than `BU` (BUILTIN\Users) — see the
+/// module header for why that distinction is the whole point of the descriptor.
+///
+/// Note the three semicolons before the SID. An ACE is
+/// `A;<flags>;<rights>;<SID>;<inheritance>`, so `(A;;GA;;S-1-...)` is not a
+/// shorthand — it is a *valid* ACE with an empty SID whose last field is the
+/// inheritance flags. `ConvertStringSecurityDescriptor` accepts it, and the pipe
+/// then fails to open for a reason that looks nothing like a permissions
+/// problem.
+fn sddl() -> Result<String, String> {
+    Ok(format!("D:P(A;;GA;;;SY)(A;;GA;;;{})", current_user_sid()?))
+}
+
+fn current_user_sid() -> Result<String, String> {
+    use windows::core::PWSTR;
+    use windows::Win32::{
+        Foundation::{LocalFree, HLOCAL},
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TokenUser, TOKEN_QUERY,
+            TOKEN_USER,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    unsafe {
+        let mut token = HANDLE(std::ptr::null_mut());
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
+            .map_err(|e| format!("reading the process token failed: {e}"))?;
+        let _token = HandleGuard(token);
+
+        // Two calls: the first asks how much space is needed, which is also the
+        // only way to find out whether the token carries a user at all.
+        let mut needed = 0u32;
+        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed);
+        if needed == 0 {
+            return Err("the process token has no user".into());
+        }
+
+        let mut buffer = vec![0u8; needed as usize];
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buffer.as_mut_ptr() as *mut std::ffi::c_void),
+            needed,
+            &mut needed,
+        )
+        .map_err(|e| format!("reading the token user failed: {e}"))?;
+
+        let user = &*(buffer.as_ptr() as *const TOKEN_USER);
+
+        let mut out = PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut out)
+            .map_err(|e| format!("converting the user SID to a string failed: {e}"))?;
+
+        let text = out.to_string().unwrap_or_default();
+        let _ = LocalFree(Some(HLOCAL(out.0 as *mut std::ffi::c_void)));
+        Ok(text)
+    }
+}
+
+/// Length in UTF-16 units of a NUL-terminated wide string.
+unsafe fn len_of(p: *const u16) -> usize {
+    let mut n = 0usize;
+    while *p.add(n) != 0 {
+        n += 1;
+    }
+    n
+}
 
 /// A pipe instance, its security descriptor, and the bookkeeping to free both.
+///
 pub struct PipeInstance {
     handle: HANDLE,
     sd: PSECURITY_DESCRIPTOR,
 }
 
+/// # Why this is `Send`
+///
+/// It is handed to a dedicated thread by the accept loop, which is what keeps one
+/// client from blocking another. `PSECURITY_DESCRIPTOR` wraps a raw pointer, so
+/// the compiler cannot see that the two fields belong exclusively to this value.
+///
+/// That is true: `handle` and `sd` are only ever touched through `&self` or
+/// `&mut self` on the owning `PipeInstance`, never copied out and never aliased.
+/// Moving the value to another thread moves exclusive ownership with it. The
+/// descriptor is created in [`PipeInstance::create`] and freed in `Drop` *after*
+/// the handle is closed, so its lifetime is a superset of the handle's, which is
+/// the ordering Win32 requires here.
+unsafe impl Send for PipeInstance {}
+
 impl PipeInstance {
     /// Create one instance. Fails if the name is already fully occupied.
     pub fn create() -> Result<Self, String> {
+        Self::create_named(PIPE_NAME)
+    }
+
+    /// Create one instance under a specific name.
+    ///
+    /// The name is a parameter so that tests can run against a pipe of their own
+    /// instead of the shared one. Otherwise `cargo test` and a `teavaultd` the
+    /// developer left running both claim `PIPE_NAME`, the test server silently
+    /// attaches to the real daemon's instances, and every assertion is made
+    /// against the wrong vault. That failure is confusing rather than obvious: the
+    /// tests do fail, but nothing points at the cause.
+    pub fn create_named(name: &str) -> Result<Self, String> {
         unsafe {
             let mut sd = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
-            let sddl = wide(SDDL);
+            let sddl = wide(&sddl()?);
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 PCWSTR(sddl.as_ptr()),
                 SDDL_REVISION_1,
@@ -106,7 +219,7 @@ impl PipeInstance {
             )
             .map_err(|e| format!("building the pipe security descriptor failed: {e}"))?;
 
-            let name = wide(PIPE_NAME);
+            let name = wide(name);
             let handle = CreateNamedPipeW(
                 PCWSTR(name.as_ptr()),
                 PIPE_ACCESS_DUPLEX,
@@ -161,16 +274,32 @@ impl PipeInstance {
 
     /// Serve requests on this connection until the client hangs up.
     ///
-    /// A connection is a **session**, not a single exchange. That matters
-    /// because the desktop UI holds one connection open and issues many commands
-    /// over it: with one-request-per-connection, every command after the first
-    /// writes into a pipe the server has already closed and fails with
-    /// ERROR_NO_DATA (os error 233) — while every one-shot client, such as the
-    /// CLI, keeps working, which makes the bug look intermittent.
+    /// A connection is a **session**, not a single exchange. That matters because
+    /// the desktop UI holds one connection open and issues many commands over it:
+    /// with one-request-per-connection every command after the first writes into a
+    /// pipe the server has already closed and fails with ERROR_NO_DATA — while
+    /// every one-shot client, such as the CLI, keeps working, which makes the bug
+    /// look intermittent.
     ///
-    /// The loop ends when the client closes (read returns 0), when the pipe
-    /// errors, or on an unrecoverable write. Between requests the thread is
-    /// blocked in the kernel, so an idle connection costs nothing.
+    /// ## Reading is bounded while it happens, not after
+    ///
+    /// The previous version called `read_line` and only then checked the length. That
+    /// defeats the limit completely: `read_line` appends to a `String` until it finds
+    /// a newline, so a client that never sends one makes the daemon allocate
+    /// gigabytes. The 64 KiB cap in `MAX_MESSAGE_BYTES` was therefore documented
+    /// protection that did not exist.
+    ///
+    /// Here the reader is wrapped in `Read::take`, so the OS is asked for at most
+    /// `MAX_MESSAGE_BYTES + 1` bytes before the buffer can grow past the limit. The
+    /// extra byte is what distinguishes "exactly at the limit" from "over it" without
+    /// a second read.
+    ///
+    /// ## The loop ends when
+    ///
+    /// The client closes (read returns 0), the pipe errors, a write fails, or the
+    /// message was oversized and the connection is dropped — an oversized message
+    /// leaves the stream at an unknown offset, so the framing can no longer be
+    /// trusted and continuing would answer requests with somebody else's bytes.
     ///
     /// The vault lock is taken inside `f`, never here, so a client that opens a
     /// connection and then sits idle cannot hold the vault hostage.
@@ -186,19 +315,29 @@ impl PipeInstance {
         let mut reader = BufReader::new(&mut *file);
         loop {
             let mut line = String::new();
-            match reader.read_line(&mut line) {
-                // Clean hang-up: the client is done with this session.
-                Ok(0) => return false,
-                Ok(n) if n > MAX_MESSAGE_BYTES => {
-                    // Refuse rather than truncate. A truncated JSON body must
-                    // never be mistaken for a smaller, valid request.
-                    if !self.write_line(&error_line("request exceeds the maximum size")) {
-                        return false;
-                    }
-                    continue;
-                }
-                Ok(_) => {}
+            let outcome = match read_line_capped(&mut reader, &mut line, MAX_MESSAGE_BYTES) {
+                Ok(o) => o,
+                // A read error ends the session. There is no useful way to
+                // continue on a pipe whose framing is in doubt.
                 Err(_) => return false,
+            };
+
+            // Clean hang-up: the client is done with this session.
+            let read = match outcome {
+                Outcome::Line(n) => n,
+                Outcome::TooLong => {
+                    // Answer, then drop the connection. Truncating and continuing
+                    // would be worse: the tail of the oversized message would be
+                    // read as the next request, so one hostile client could make
+                    // TEAvault execute a request it never received.
+                    let _ = self.write_line(&error_line(
+                        "request exceeds the maximum size; this connection is being closed",
+                    ));
+                    return false;
+                }
+            };
+            if read == 0 {
+                return false;
             }
 
             let trimmed = line.trim_end_matches(['\r', '\n']);
@@ -259,6 +398,78 @@ impl Drop for PipeInstance {
 /// NUL-terminated UTF-16, for the W-suffixed Win32 entry points.
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// What a capped read found.
+enum Outcome {
+    /// A complete line, plus how many bytes it consumed.
+    Line(usize),
+    /// The message passed `cap` before a newline appeared.
+    TooLong,
+}
+
+/// `read_line` with a hard ceiling enforced *while* the bytes arrive.
+///
+/// `BufRead::read_line` grows its `String` until it finds a newline, so a client
+/// that never sends one makes the daemon allocate without bound. The previous
+/// version read first and checked the length afterwards, which is not a limit at
+/// all — `MAX_MESSAGE_BYTES` bounded what a *well-behaved* client could send while
+/// documenting protection against a hostile one.
+///
+/// Here growth is refused as soon as it would pass `cap`, so the worst case is a
+/// single bounded allocation and the rest of the oversized message is never
+/// consumed.
+fn read_line_capped<R: BufRead>(
+    reader: &mut R,
+    out: &mut String,
+    cap: usize,
+) -> std::io::Result<Outcome> {
+    let mut total = 0usize;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            return Ok(Outcome::Line(total));
+        }
+        match available.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                if out.len() + i + 1 > cap {
+                    return Ok(Outcome::TooLong);
+                }
+                push_bytes(out, &available[..=i]);
+                reader.consume(i + 1);
+                return Ok(Outcome::Line(total + i + 1));
+            }
+            None => {
+                let len = available.len();
+                if out.len() + len > cap {
+                    // Stop without consuming: the remainder is still queued and
+                    // the caller is about to close the connection anyway.
+                    return Ok(Outcome::TooLong);
+                }
+                push_bytes(out, available);
+                reader.consume(len);
+                total += len;
+            }
+        }
+    }
+}
+
+/// Append pipe bytes to `out`.
+///
+/// A pipe carries arbitrary bytes, so the content may not be UTF-8. Lossy
+/// conversion here is safe *because* the result is handed to a JSON parser,
+/// which rejects anything malformed and produces the right error; the
+/// alternative — propagating the UTF-8 error — would turn "not a request" into a
+/// transport failure and drop the connection.
+fn push_bytes(out: &mut String, bytes: &[u8]) {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => out.push_str(s),
+        Err(_) => out.push_str(&String::from_utf8_lossy(bytes)),
+    }
 }
 
 fn last_error_string() -> String {
@@ -395,10 +606,11 @@ impl From<std::io::Error> for ClientError {
 
 /// A connected pipe.
 ///
-/// One request per connection, then the pipe is closed. That is deliberate:
-/// a long-lived connection would need per-connection state and a way to
-/// guarantee it is torn down, and the cheapest possible thing to get right here
-/// is one exchange per connection.
+/// A connection is a session, not a single exchange. The desktop UI holds one
+/// open for its whole lifetime and issues many commands over it; making this
+/// one-request-per-connection broke every command after the first while leaving
+/// the CLI — which connects per command — working, which is why the bug looked
+/// intermittent rather than obvious.
 pub struct Client {
     handle: HANDLE,
 }
@@ -409,9 +621,18 @@ impl Client {
     /// A refusal is never retried: it is the daemon's answer, and asking again would
     /// only give a caller a second attempt at whatever it is probing.
     pub fn connect_with_retry(timeout: std::time::Duration) -> Result<Client, ClientError> {
+        Client::connect_with_retry_named(PIPE_NAME, timeout)
+    }
+
+    /// `connect_with_retry` against a specific pipe name. See
+    /// [`PipeInstance::create_named`] for why the name is a parameter at all.
+    pub fn connect_with_retry_named(
+        pipe_name: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Client, ClientError> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            match Client::connect() {
+            match Client::connect_named(pipe_name) {
                 Ok(c) => return Ok(c),
                 Err(ClientError::Refused(r)) => {
                     return Err(ClientError::Refused(r));
@@ -427,8 +648,13 @@ impl Client {
     }
 
     pub fn connect() -> Result<Self, ClientError> {
+        Client::connect_named(PIPE_NAME)
+    }
+
+    /// `connect` against a specific pipe name.
+    pub fn connect_named(pipe_name: &str) -> Result<Self, ClientError> {
         unsafe {
-            let name = wide(PIPE_NAME);
+            let name = wide(pipe_name);
             CreateFileW(
                 PCWSTR(name.as_ptr()),
                 PIPE_ACCESS_DUPLEX.0,
@@ -450,6 +676,10 @@ impl Client {
     }
 
     /// Send one request, read one response.
+    ///
+    /// A connection may carry several requests — that is what makes the desktop UI's
+    /// long-lived session work — but each `send` is a single complete exchange, and
+    /// the handle stays owned by `Client` throughout.
     pub fn send(&self, req: Request) -> Result<serde_json::Value, ClientError> {
         let line = serde_json::to_string(&req).map_err(|e| ClientError::Protocol(e.to_string()))?;
         if line.len() > MAX_MESSAGE_BYTES {
@@ -460,16 +690,34 @@ impl Client {
         bytes.push(b'\n');
 
         let raw = self.handle.0;
-        let file = std::fs::File::from(unsafe { OwnedHandle::from_raw_handle(raw) });
+        // Borrow, do not own: `Client` still owns the handle and its `Drop`
+        // closes it. The previous version wrapped the handle in an `OwnedHandle`
+        // and then `mem::forget` the `File` on the *success* path only — so every
+        // early return and every `?` closed the handle, and `Client::drop` closed
+        // it a second time. Closing a handle twice is not a no-op: the second
+        // close can land on a recycled handle belonging to an unrelated object.
+        // `ManuallyDrop` makes the ownership unambiguous on every path.
+        let file = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_handle(raw) });
+        let mut file = file;
         {
-            let mut writer = &file;
+            let writer = &mut *file;
             writer.write_all(&bytes)?;
             writer.flush()?;
         }
 
-        let mut reader = BufReader::new(&file);
         let mut text = String::new();
-        let n = reader.read_line(&mut text)?;
+        let n = match read_line_capped(
+            &mut BufReader::new(&mut *file),
+            &mut text,
+            MAX_MESSAGE_BYTES,
+        )? {
+            Outcome::Line(n) => n,
+            Outcome::TooLong => {
+                return Err(ClientError::Protocol(
+                    "the daemon sent a response larger than the protocol allows".into(),
+                ))
+            }
+        };
         if n == 0 {
             return Err(ClientError::Protocol(
                 "the daemon closed the connection without answering".into(),
@@ -479,10 +727,6 @@ impl Client {
         let response: teavault_core::ipc::Response =
             serde_json::from_str(text.trim_end_matches(['\r', '\n']))
                 .map_err(|e| ClientError::Protocol(e.to_string()))?;
-
-        // The `File` is a borrowed view of the handle; forget it so `Drop` does
-        // not close a handle `Client` owns.
-        std::mem::forget(file);
 
         match response.error {
             None => Ok(response.result.unwrap_or(serde_json::Value::Null)),
@@ -502,5 +746,28 @@ impl Drop for Client {
         unsafe {
             let _ = CloseHandle(self.handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod sddl_tests {
+    use super::sddl;
+
+    #[test]
+    fn the_descriptor_names_this_user_and_not_all_users() {
+        let d = sddl().expect("the current user's SID must be readable");
+        assert!(d.starts_with("D:P"), "the DACL must be protected: {d}");
+        assert!(
+            d.contains("SY"),
+            "the system account must be reachable: {d}"
+        );
+        assert!(
+            !d.contains(";;;BU)"),
+            "BUILTIN\\Users must not be granted access: {d}"
+        );
+        assert!(
+            d.contains(";;;S-1-"),
+            "the current user's SID must be present: {d}"
+        );
     }
 }

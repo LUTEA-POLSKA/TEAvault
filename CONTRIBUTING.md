@@ -135,11 +135,10 @@ development — `direction="row"` where TEAui wants `"horizontal"`, `variant=` o
 
 The daemon is expected to be idle. Before adding anything that runs on a timer:
 
-- **Can it run when the daemon already wakes up for another reason?** Auto-lock
-  works this way — it is a pure function evaluated on the next event rather than a
-  tick. That is why an idle vault costs nothing to keep locked.
 - **Can it be a one-shot instead of a repeating one?** The clipboard deadline is a
-  `Condvar` with an indefinite wait, not a poll.
+  `Condvar` with an indefinite wait, not a poll. Auto-lock was removed outright
+  rather than made cheap, which is the preferred answer when the feature can be
+  dropped: a deadline nobody asked for is not worth engineering towards zero.
 - **What does it cost when idle?** If you added it, measure it with
   `cargo run --release -p teavault-daemon --bin teavault-bench` and put the number
   in `BENCHMARKS.md`.

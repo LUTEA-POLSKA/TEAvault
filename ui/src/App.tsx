@@ -1,349 +1,475 @@
 /**
  * The application shell.
  *
- * Every component rendered here comes from TEAui — `@tea-ui/core` for
- * primitives, `@tea-ui/admin` for the shell and product states. There is no
- * second component library, and no prop, token or component that TEAui does not
- * actually export. `docs/UI_NOTES.md` records the verification and the one gap.
+ * ## The shape of this product, and the shape of this window
  *
- * The security-relevant observation: **no component here decides whether
- * something may be shown.** Every screen renders what the daemon returned, and a
- * refusal is rendered as a refusal. The UI cannot widen access because it has no
- * code path that could.
+ * TEAvault is a 940x620 window that sits beside a text editor while something
+ * else is running. It is not an application that is minimised; it is one that is
+ * closed and reopened, so nothing here is designed to be kept on screen:
+ *
+ * * **Four views, one of which matters.** Keys is where the time goes. Access is
+ *   where the decisions happen. Activity and Settings are reference. There is no
+ *   dashboard, no metric row and no overview, because there is no question a
+ *   summary of numbers would answer better than the list itself.
+ * * **No route, no router, no history.** A tab state that survives a restart is
+ *   not a feature; it is a window that opens on the wrong screen.
+ * * **One dialog at a time, and it is modal for a reason.** Creating a key,
+ *   changing the passphrase and restoring a backup all ask for something the user
+ *   has to think about.
+ *
+ * ## Resource behaviour
+ *
+ * No polling. `refresh` runs on mount, after a mutation, and on a window-focus
+ * event, and that is the whole refresh story. A timer would wake the WebView every
+ * second to learn nothing — and the countdown in the title bar is computed
+ * locally from the value the daemon last reported, precisely so that it can tick
+ * without a round trip.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Alert, Button, HStack, Stack, Text, toast } from '@tea-ui/core'
 
-import { AdminShell, type NavItem, EmptyState, Page, PageHeader } from '@tea-ui/admin'
-import {
-  Alert,
-  AlertDescription,
-  AlertTitle,
-  Badge,
-  Button,
-  Card,
-  CardBody,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-  Container,
-  Field,
-  FieldDescription,
-  FieldLabel,
-  PasswordInput,
-  ScrollArea,
-  SearchInput,
-  Stack,
-  StatusBadge,
-  Text,
-  toast,
-  Toaster,
-  VStack,
-} from '@tea-ui/core'
-
-import { api, AuditEvent, ListEntry, PendingApproval, VaultError } from './api'
-import { AccessScreen } from './components/AccessScreen'
-import { ApprovalDialog } from './components/ApprovalDialog'
-import { AuditScreen } from './components/AuditScreen'
-import { EntryDialog } from './components/EntryDialog'
-import { SettingsScreen } from './components/SettingsScreen'
+import { api } from './api'
+import { VaultError } from './api'
+import type {
+  AuditEvent,
+  GrantModeWire,
+  KnownClient,
+  ListEntry,
+  PendingApproval,
+  Row,
+  Settings,
+  Status,
+} from './api'
+import { AccessPanel } from './components/AccessPanel'
+import { ActivityPanel } from './components/ActivityPanel'
+import { CopiedNote, EntryDialog, type EntryInput } from './components/EntryDialog'
+import { KeysPanel, UnlockPanel } from './components/KeysPanel'
+import { SettingsPanel } from './components/SettingsPanel'
 import { SetupScreen } from './components/SetupScreen'
-import { TitleBar } from './components/TitleBar'
+import { TitleBar, type View } from './components/TitleBar'
 
-import '@tea-ui/core/styles.css'
-import '@tea-ui/admin/styles.css'
-
-type Screen = 'keys' | 'detail' | 'access' | 'audit' | 'settings'
+const PROVIDERS = ['OpenAI', 'Anthropic', 'Google', 'Azure', 'GitHub', 'AWS', 'Other']
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>('keys')
-  const [locked, setLocked] = useState(true)
-  const [initialized, setInitialized] = useState(false)
-  const [autoLockIn, setAutoLockIn] = useState<number | null>(null)
-  const [pending, setPending] = useState<PendingApproval[]>([])
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<VaultError | null>(null)
-
+  const [view, setView] = useState<View>('keys')
+  const [status, setStatus] = useState<Status | null>(null)
   const [entries, setEntries] = useState<ListEntry[]>([])
-  const [selected, setSelected] = useState<ListEntry | null>(null)
-  const [query, setQuery] = useState('')
-  const [editing, setEditing] = useState<{ mode: 'create' } | { mode: 'edit'; entry: ListEntry } | null>(null)
-  const [answering, setAnswering] = useState<PendingApproval | null>(null)
+  const [pending, setPending] = useState<PendingApproval[]>([])
+  const [rows, setRows] = useState<Row[]>([])
+  const [known, setKnown] = useState<KnownClient[]>([])
+  const [events, setEvents] = useState<AuditEvent[]>([])
+  const [settings, setSettings] = useState<Settings | null>(null)
+  const [error, setError] = useState<VaultError | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [editing, setEditing] = useState<ListEntry | null | 'new'>(null)
+  const [copied, setCopied] = useState<{ masked: string; clearedIn: number | null } | null>(null)
 
-  /** Report a refusal. Never swallowed, never retried automatically. */
-  const fail = useCallback((e: unknown) => {
-    const err =
-      e instanceof VaultError
-        ? e
-        : new VaultError({ code: 'io', message: String(e), retryable: false })
+const reportedAt = useRef<number>(0)
+
+  const report = useCallback((e: unknown) => {
+    const err = e instanceof VaultError ? e : new VaultError({ code: 'io', message: String(e), retryable: false })
     setError(err)
-    if (err.isLocked) setLocked(true)
   }, [])
 
-const refresh = useCallback(async () => {
-    try {
-      const s = await api.status()
-      setInitialized(s.initialized)
-      setLocked(s.locked)
-      setAutoLockIn(s.auto_lock_in)
+  const refresh = useCallback(async () => {
+    const s = await api.status()
+    setStatus(s)
 
-      // Only ask for pending approvals when there is a vault to have approvals
-      // in. Asking a locked or non-existent vault produces a refusal, and
-      // showing that refusal as a red banner above the setup screen reads as
-      // "something is broken" when nothing is.
-      if (s.initialized && !s.locked) {
-        setPending(await api.approvals())
-        setEntries((await api.list()).entries)
-      } else {
-        setPending([])
-        setEntries([])
-      }
-    } catch (e) {
-      fail(e)
-    }
-  }, [fail])
-
-  useEffect(() => {
-    void refresh()
-  }, [refresh])
-
-  /**
-   * The auto-lock countdown is the only timer in this app.
-   *
-   * It is a display concern only: it counts down a number the daemon computed
-   * from its own last-activity timestamp and decides nothing. A missed tick
-   * costs a stale countdown. The daemon itself has no timers at all — see
-   * `ARCHITECTURE.md` § Idle.
-   */
-  useEffect(() => {
-    if (locked || autoLockIn === null) return
-    const id = window.setInterval(() => {
-      setAutoLockIn((v) => (v === null ? null : Math.max(0, v - 1)))
-      if (autoLockIn <= 1) void refresh()
-    }, 1000)
-    return () => window.clearInterval(id)
-  }, [locked, autoLockIn, refresh])
-
-  const visible = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return entries
-    return entries.filter((e) =>
-      [e.name, e.display_name, e.provider, ...e.capabilities].some((f) =>
-        f.toLowerCase().includes(q),
-      ),
-    )
-  }, [entries, query])
-
-  const nav: NavItem[] = [
-    { id: 'keys', label: 'API keys' },
-    { id: 'detail', label: 'Detail', disabled: !selected },
-    { id: 'access', label: 'Access', meta: pending.length || undefined },
-    { id: 'audit', label: 'Activity' },
-    { id: 'settings', label: 'Settings' },
-  ]
-
-  async function onLock() {
-    setBusy(true)
-    try {
-      await api.lock()
-      setLocked(true)
+    // Only ask for things that are answerable. Asking `list` and `approvals` on a
+    // locked or uninitialised vault produces a refusal, and rendering that refusal
+    // as a red banner above the unlock form reads as "something is broken" when
+    // in fact everything is behaving correctly.
+    if (s.initialized && !s.locked) {
+      const [list, approvals, access, clients] = await Promise.all([
+        api.list(),
+        api.approvals(),
+        api.accessOverview(),
+        api.knownClients(),
+      ])
+      setEntries(list.entries)
+      setPending(approvals)
+      setRows(access)
+      setKnown(clients)
+    } else {
       setEntries([])
-      setSelected(null)
-      toast({ title: 'Vault locked', tone: 'neutral' })
+      setPending([])
+      setRows([])
+      setKnown([])
+    }
+
+    if (s.initialized && view === 'activity') {
+      setEvents(await api.auditRecent(200))
+    }
+    if (s.initialized && view === 'settings' && !settings) {
+      setSettings(await api.getSettings())
+    }
+
+reportedAt.current = Date.now()
+  }, [view, settings])
+
+  useEffect(() => {
+    void refresh().catch(report)
+    // Re-read when the window regains focus. The daemon is a separate process and
+    // the user may have locked it from the tray while this window was behind
+    // something else, so the local state can be stale.
+    const onFocus = () => void refresh().catch(report)
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [refresh, report])
+
+// The clipboard countdown is local for the same reason, and it clears the note
+  // rather than polling the daemon to find out whether the value is gone.
+  useEffect(() => {
+    if (!copied || copied.clearedIn === null) return
+    if (copied.clearedIn <= 0) {
+      setCopied(null)
+      return
+    }
+    const id = setTimeout(() => {
+      setCopied((c) => (c ? { ...c, clearedIn: (c.clearedIn ?? 1) - 1 } : null))
+    }, 1000)
+    return () => clearTimeout(id)
+  }, [copied])
+
+  async function guard<T>(label: string, f: () => Promise<T>): Promise<T | null> {
+    setBusy(true)
+    setError(null)
+    try {
+      return await f()
     } catch (e) {
-      fail(e)
+      report(e)
+      return null
     } finally {
       setBusy(false)
+      void label
     }
   }
 
-  async function onCopy(entry: ListEntry) {
-    try {
-      const r = await api.copyToClipboard(entry.id)
-      toast({
-        title: 'Copied to clipboard',
-        description: `${entry.name} — ${r.masked}. Any program can read the clipboard before it clears.`,
-        tone: 'caution',
-      })
-    } catch (e) {
-      fail(e)
+  const locked = status?.locked ?? true
+  const initialized = status?.initialized ?? false
+  const pendingCount = pending.length
+
+  const errorText = useMemo(() => {
+    if (!error) return null
+    return {
+      code: error.code,
+// A vault that got locked elsewhere is not an error worth shouting about —
+      // the unlock panel is already the answer.
+      hidden: error.code === 'vault_locked' || error.code === 'needs_confirmation',
+      message: titleFor(error.code),
+      detail: error.message,
     }
-  }
+  }, [error])
 
-return (
-    <>
-      <Toaster />
-      <div
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          height: '100vh',
-          width: '100%',
-        }}
-      >
-        <TitleBar locked={locked} autoLockIn={autoLockIn} pending={pending.length} />
-
-        {!initialized ? (
-          /* No vault yet: no sidebar, no navigation to screens that cannot mean
-             anything, no product name in a header as well as in the title bar.
-             Setup is the whole application at this point, and pretending
-             otherwise is how a first run starts to feel broken. */
-          <SetupScreen onCreated={refresh} onError={fail} />
-        ) : (
-        <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-      <AdminShell
-        product="TEAvault"
-        nav={nav}
-        activeId={screen}
-        onNavigate={(id) => setScreen(id as Screen)}
-        actions={
-          <Stack direction="horizontal" gap="ui">
-            <Button
-              variant="secondary"
-              size="sm"
-              loading={busy}
-              disabled={locked}
-              onClick={() => setEditing({ mode: 'create' })}
-            >
-              Add key
-            </Button>
-            <Button variant="primary" size="sm" disabled={locked} loading={busy} onClick={onLock}>
-              Lock now
-            </Button>
-          </Stack>
-        }
-      >
-        <Page>
-          {error && (
-            <Alert tone={error.code === 'integrity' ? 'critical' : 'caution'} role="alert">
-              <AlertTitle>{titleForCode(error.code)}</AlertTitle>
-              <AlertDescription>{error.message}</AlertDescription>
+  if (!status) {
+    return (
+      <div style={{ height: '100vh', display: 'grid', placeItems: 'center' }}>
+        <Stack gap="ui" align="center">
+          <Text size="ui" tone="muted">
+            Connecting to the TEAvault background process…
+          </Text>
+          {errorText && (
+            <Alert tone="critical" role="alert">
+              <Text size="ui">{errorText.detail}</Text>
             </Alert>
           )}
-
-          {locked && <UnlockPanel onUnlocked={refresh} onError={fail} />}
-
-          {!locked && screen === 'keys' && (
-            <>
-              <PageHeader
-                title="API keys"
-                description="Metadata for every key this client may see. A key's value is never shown here — releasing it is a separate, permission-checked action."
-              />
-              <Stack gap="section">
-                <SearchInput
-                  label="Search keys"
-                  placeholder="Name, provider or capability"
-                  value={query}
-                  onValueChange={setQuery}
-                  clearable
-                />
-
-                {visible.length === 0 ? (
-                  <EmptyState
-                    title={query ? 'No keys match that search' : 'No API keys yet'}
-                    description={
-                      query
-                        ? 'The search filtered everything out. Clearing it will show them again.'
-                        : 'Add one to make it discoverable to your tools. Adding does not grant any application access to it.'
-                    }
-                    action={
-                      query ? (
-                        <Button variant="secondary" onClick={() => setQuery('')}>
-                          Clear search
-                        </Button>
-                      ) : (
-                        <Button variant="primary" onClick={() => setEditing({ mode: 'create' })}>
-                          Add your first key
-                        </Button>
-                      )
-                    }
-                  />
-                ) : (
-                  <ScrollArea>
-                    <VStack gap="ui">
-                      {visible.map((e) => (
-                        <EntryCard
-                          key={e.id}
-                          entry={e}
-                          onOpen={() => {
-                            setSelected(e)
-                            setScreen('detail')
-                          }}
-                          onCopy={() => void onCopy(e)}
-                          onDelete={async () => {
-                            setBusy(true)
-                            try {
-                              await api.deleteEntry(e.id)
-                              toast({ title: `${e.name} deleted`, tone: 'neutral' })
-                              setSelected(null)
-                              await refresh()
-                            } catch (err) {
-                              fail(err)
-                            } finally {
-                              setBusy(false)
-                            }
-                          }}
-                        />
-                      ))}
-                    </VStack>
-                  </ScrollArea>
-                )}
-              </Stack>
-            </>
-          )}
-
-          {!locked && screen === 'detail' && (
-            <DetailScreen
-              entry={selected}
-              onBack={() => setScreen('keys')}
-              onError={fail}
-              onEdit={(entry) => setEditing({ mode: 'edit', entry })}
-            />
-          )}
-
-          {!locked && screen === 'access' && (
-            <AccessScreen pending={pending} onRefresh={refresh} onError={fail} onAnswer={setAnswering} />
-          )}
-
-          {!locked && screen === 'audit' && <AuditScreen onError={fail} />}
-
-          {!locked && screen === 'settings' && <SettingsScreen onError={fail} onSaved={refresh} />}
-        </Page>
-</AdminShell>
-        </div>
-        )}
+          <Button size="sm" variant="secondary" onClick={() => void refresh().catch(report)}>
+            Try again
+          </Button>
+        </Stack>
       </div>
+    )
+  }
+
+  if (!initialized) {
+    return (
+      <Shell locked pending={0} view={view} onView={setView} onLock={() => {}}>
+        <SetupScreen
+          onCreated={async (passphrase) => {
+            await guard('created', async () => {
+              await api.init(passphrase)
+              await refresh()
+            })
+          }}
+        />
+      </Shell>
+    )
+  }
+
+  return (
+    <Shell
+locked={locked}
+      pending={pendingCount}
+      view={view}
+      onView={(v) => {
+        setView(v)
+        // Per-view data is fetched on demand, not eagerly on every state change.
+        if (v === 'activity') void api.auditRecent(200).then(setEvents).catch(report)
+        if (v === 'settings' && !settings) void api.getSettings().then(setSettings).catch(report)
+      }}
+      onLock={() => void guard('locked', async () => { await api.lock(); await refresh() })}
+    >
+      {locked ? (
+<UnlockPanel
+          onUnlock={async (passphrase) => {
+            await guard('unlocked', async () => {
+              await api.unlock(passphrase)
+              await refresh()
+            })
+          }}
+          onWipe={async () => {
+            // After a wipe the vault does not exist, so `refresh` lands on the
+            // setup screen. Nothing else needs clearing: the passphrase only ever
+            // lived inside the panel, which unmounts, and every view reads from the
+            // daemon rather than from state the wipe could leave stale.
+            await guard('wiped', async () => {
+              await api.wipe()
+              await refresh()
+            })
+          }}
+        />
+      ) : (
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {errorText && !errorText.hidden && (
+            <div style={{ padding: '10px 16px 0' }}>
+              <Alert tone="critical" role="alert">
+                <HStack align="center" justify="between" gap="ui">
+                  <Text size="ui">
+                    {errorText.message} — {errorText.detail}
+                  </Text>
+                  <Button size="sm" variant="ghost" onClick={() => setError(null)}>
+                    Dismiss
+                  </Button>
+                </HStack>
+              </Alert>
+            </div>
+          )}
+
+          {copied && (
+            <div style={{ padding: '10px 16px 0' }}>
+              <CopiedNote masked={copied.masked} clearedIn={copied.clearedIn} />
+            </div>
+          )}
+
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+            {view === 'keys' && (
+              <KeysPanel
+                entries={entries}
+                pendingCount={pendingCount}
+                onAdd={() => setEditing('new')}
+                onEdit={setEditing}
+                onCopy={async (e) => {
+                  const r = await guard('copied', async () => {
+                    const out = await api.copyToClipboard(e.name)
+                    await refresh()
+                    return out
+                  })
+                  if (r) {
+                    setCopied({
+                      masked: r.masked,
+                      clearedIn: settings?.clipboard_clear_seconds
+                        ? settings.clipboard_clear_seconds
+                        : null,
+                    })
+                    toast({
+                      title: 'Copied to the clipboard',
+                      description: `${e.name} — it clears itself after ${settings?.clipboard_clear_seconds ?? 0}s. Any program running as you can read the clipboard in the meantime.`,
+                      tone: 'caution',
+                    })
+                  }
+                }}
+                onDelete={async (e) => {
+                  const r = await guard('deleted', async () => {
+                    await api.deleteEntry(e.name)
+                    await refresh()
+                  })
+                  if (r !== null) toast({ title: `${e.name} deleted` })
+                }}
+                onGoToAccess={() => setView('access')}
+              />
+            )}
+
+            {view === 'access' && (
+              <AccessPanel
+                pending={pending}
+                rows={rows}
+                known={known}
+                onAnswer={async (p, mode: GrantModeWire) => {
+                  const r = await guard('answered', async () => {
+                    await api.resolveApproval(p.request_id, p.entry_name, mode)
+                    await refresh()
+                  })
+                  if (r !== null) {
+                    toast({
+                      title:
+                        mode === 'deny'
+                          ? 'Denied'
+                          : mode === 'allow_once'
+                            ? 'Allowed once'
+                            : 'Always allowed',
+                      description:
+                        mode === 'always_allow'
+                          ? `${p.client_label} can read ${p.entry_name} until you revoke it.`
+                          : undefined,
+                    })
+                  }
+                }}
+                onRevoke={async (grantId) => {
+                  await guard('revoked', async () => {
+                    await api.revokeGrant(grantId)
+                    await refresh()
+                  })
+                }}
+                onRevokeClient={async (fp) => {
+                  await guard('revoked', async () => {
+                    await api.revokeClient(fp)
+                    await refresh()
+                  })
+                }}
+              />
+            )}
+
+            {view === 'activity' && <ActivityPanel events={events} />}
+
+            {view === 'settings' &&
+              (settings ? (
+                <SettingsPanel
+                  settings={settings}
+                  onSave={async (s) => {
+                    const applied = await guard('saved', async () => {
+                      const out = await api.setSettings(s)
+                      await refresh()
+                      return out
+                    })
+                    if (applied) setSettings(applied)
+                  }}
+                  onChangePassphrase={async (current, next) => {
+                    await guard('changed', async () => {
+                      await api.changePassphrase(current, next)
+                    })
+                  }}
+onBackup={async (file, passphrase) => {
+                    await guard('backed up', async () => {
+                      const out = await api.backupExport(file, passphrase)
+                      toast({ title: 'Backup written', description: out.path })
+                    })
+                  }}
+                  onRestore={async (file, passphrase, overwrite) => {
+                    await guard('restored', async () => {
+                      const r = await api.backupImport(file, passphrase, overwrite)
+                      await refresh()
+                      toast({
+                        title: 'Backup restored',
+                        description: `${r.added} added, ${r.skipped} kept, ${r.replaced} replaced.`,
+                      })
+                    })
+                  }}
+                />
+              ) : (
+                <div style={{ padding: '20px' }}>
+                  <Text size="ui" tone="muted">
+                    Loading settings…
+                  </Text>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
 
       {editing && (
         <EntryDialog
-          mode={editing.mode}
-          entry={editing.mode === 'edit' ? editing.entry : null}
+          entry={editing === 'new' ? null : editing}
+          providers={PROVIDERS}
           onClose={() => setEditing(null)}
-          onSaved={async () => {
-            setEditing(null)
-            await refresh()
+          onError={report}
+          onSave={async (input: EntryInput) => {
+            const saved = await guard('saved', async () => {
+              if (input.id) {
+                await api.updateEntry(input.id, {
+                  display_name: input.display_name,
+                  provider: input.provider,
+                  description: input.description,
+                  hidden: input.hidden,
+                  secret: input.secret ?? undefined,
+                })
+              } else {
+                await api.createEntry({
+                  name: input.name,
+                  display_name: input.display_name,
+                  provider: input.provider,
+                  description: input.description,
+                  hidden: input.hidden,
+                  secret: input.secret ?? '',
+                })
+              }
+              await refresh()
+            })
+            if (saved !== null) {
+              setEditing(null)
+              toast({ title: input.id ? 'Key updated' : `${input.name} added` })
+            }
           }}
-          onError={fail}
         />
       )}
 
-      {answering && (
-        <ApprovalDialog
-          approval={answering}
-          onClose={() => setAnswering(null)}
-          onResolved={async () => {
-            setAnswering(null)
-            await refresh()
-          }}
-          onError={fail}
-        />
-      )}
-    </>
+      {busy && null}
+    </Shell>
   )
 }
 
-function titleForCode(code: string): string {
+/**
+ * The frame: title bar with navigation, then the content.
+ *
+ * Split out so the first-run and locked states get the same bar as the main views
+ * — a layout that changes when the vault is locked makes the window feel like a
+ * different application each time it opens.
+ */
+function Shell({
+  locked,
+  pending,
+  view,
+  onView,
+  onLock,
+  children,
+}: {
+  locked: boolean
+  pending: number
+  view: View
+  onView: (v: View) => void
+  onLock: () => void
+  children: React.ReactNode
+}) {
+return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100vh',
+        width: '100%',
+        // The window is a fixed size, so there is nothing to scroll to
+        // horizontally. Allowing it anyway would let a wide child grow the
+        // document, and every centred element on the page would then centre
+        // against the overflow width rather than the window — which is a
+        // confusing thing to debug and an obvious-looking one once seen.
+        overflow: 'hidden',
+      }}
+    >
+      <TitleBar
+locked={locked}
+        pending={pending}
+        view={view}
+        onView={onView}
+        onLock={onLock}
+      />
+      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function titleFor(code: string): string {
   switch (code) {
     case 'locked':
     case 'vault_locked':
@@ -353,317 +479,18 @@ function titleForCode(code: string): string {
     case 'attempts_exhausted':
       return 'Too many attempts'
     case 'integrity':
-      return 'Data did not verify'
+      return 'Stored data did not verify'
     case 'needs_confirmation':
       return 'Waiting for your decision'
-    case 'grant_expired':
-      return 'That approval has expired'
-    case 'no_grant':
-    case 'operation_not_allowed':
     case 'denied_by_user':
-      return 'Not allowed'
+      return 'Access was denied'
+    case 'expired':
+      return 'That permission has expired'
+    case 'operation_not_allowed':
+      return 'Not permitted'
+    case 'io':
+      return 'Could not reach the background process'
     default:
       return 'Something went wrong'
-  }
-}
-
-function EntryCard({
-  entry,
-  onOpen,
-  onCopy,
-  onDelete,
-}: {
-  entry: ListEntry
-  onOpen: () => void
-  onCopy: () => void
-  onDelete: () => void
-}) {
-  return (
-    <Card>
-      <CardHeader>
-        <Stack direction="horizontal" align="center" justify="between" gap="ui">
-          <VStack gap="none">
-            {/* `level` is required: a card on a page whose heading is h1 is an h2. */}
-            <CardTitle level={2}>{entry.display_name}</CardTitle>
-            <Text size="ui" tone="muted">
-              {entry.name}
-            </Text>
-          </VStack>
-          <Stack direction="horizontal" gap="none" align="center">
-            <StatusBadge domain="security" status={entry.granted ? 'ok' : 'warning'} />
-            {entry.hidden && <Badge tone="neutral">hidden</Badge>}
-          </Stack>
-        </Stack>
-      </CardHeader>
-      <CardBody>
-        <Stack gap="ui">
-          <Stack direction="horizontal" gap="none" align="center">
-            <Badge tone="info">{entry.provider}</Badge>
-            {entry.capabilities.map((c) => (
-              <Badge key={c} tone="neutral">
-                {c}
-              </Badge>
-            ))}
-          </Stack>
-          {entry.description && (
-            <Text size="body" tone="muted">
-              {entry.description}
-            </Text>
-          )}
-        </Stack>
-      </CardBody>
-      <CardFooter>
-        <Stack direction="horizontal" gap="ui">
-          <Button variant="outline" size="sm" onClick={onOpen}>
-            Details
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={!entry.granted}
-            title={
-              entry.granted
-                ? 'Copy the value to the clipboard'
-                : 'This client has not been granted access to this key'
-            }
-            onClick={onCopy}
-          >
-            Copy
-          </Button>
-          <Button variant="ghost" size="sm" onClick={onDelete}>
-            Delete
-          </Button>
-        </Stack>
-      </CardFooter>
-    </Card>
-  )
-}
-
-function UnlockPanel({
-  onUnlocked,
-  onError,
-}: {
-  onUnlocked: () => Promise<void>
-  onError: (e: unknown) => void
-}) {
-  const [passphrase, setPassphrase] = useState('')
-  const [busy, setBusy] = useState(false)
-
-  return (
-    <Container size="sm" center>
-      <Card>
-        <CardHeader>
-          <CardTitle level={2}>Unlock</CardTitle>
-          <CardDescription>
-            The master passphrase is never stored and never written to disk. There is no recovery
-            if it is forgotten.
-          </CardDescription>
-        </CardHeader>
-        <CardBody>
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault()
-              setBusy(true)
-              try {
-                await api.unlock(passphrase)
-                setPassphrase('')
-                await onUnlocked()
-              } catch (err) {
-                onError(err)
-              } finally {
-                setBusy(false)
-              }
-            }}
-          >
-            <Stack gap="section">
-              <Field required>
-                <FieldLabel>Master passphrase</FieldLabel>
-                <PasswordInput
-                  autoComplete="current-password"
-                  value={passphrase}
-                  onValueChange={setPassphrase}
-                  placeholder="Your master passphrase"
-                />
-                <FieldDescription>
-                  The vault locks again after a period of inactivity, on sign-out, and on every
-                  start. It is never unlocked automatically.
-                </FieldDescription>
-              </Field>
-              <div>
-                <Button type="submit" variant="primary" loading={busy} disabled={!passphrase}>
-                  Unlock
-                </Button>
-              </div>
-            </Stack>
-          </form>
-        </CardBody>
-      </Card>
-    </Container>
-  )
-}
-
-function DetailScreen({
-  entry,
-  onBack,
-  onError,
-  onEdit,
-}: {
-  entry: ListEntry | null
-  onBack: () => void
-  onError: (e: unknown) => void
-  onEdit: (entry: ListEntry) => void
-}) {
-  const [events, setEvents] = useState<AuditEvent[]>([])
-
-  useEffect(() => {
-    if (!entry) return
-    void (async () => {
-      try {
-        // Derived from the audit log by entry name. The log holds no key values,
-        // so nothing sensitive can reach this view through it.
-        const all = await api.auditRecent(200)
-        setEvents(all.filter((e) => JSON.stringify(e.event).includes(entry.name)).slice(0, 20))
-      } catch (e) {
-        onError(e)
-      }
-    })()
-  }, [entry, onError])
-
-  if (!entry) {
-    return (
-      <EmptyState
-        title="No key selected"
-        description="Pick one from the list."
-        action={<Button onClick={onBack}>Back to all keys</Button>}
-      />
-    )
-  }
-
-  return (
-    <VStack gap="section">
-      <PageHeader
-        title={entry.display_name}
-        description={entry.name}
-        breadcrumb={
-          <Button variant="ghost" size="sm" onClick={onBack}>
-            All keys
-          </Button>
-        }
-        actions={
-          <Stack direction="horizontal" gap="ui">
-            <Button variant="outline" onClick={() => onEdit(entry)}>
-              Edit
-            </Button>
-            <Button
-              variant="secondary"
-              disabled={!entry.granted}
-              onClick={async () => {
-                try {
-                  const r = await api.copyToClipboard(entry.id)
-                  toast({ title: 'Copied', description: r.masked, tone: 'caution' })
-                } catch (e) {
-                  onError(e)
-                }
-              }}
-            >
-              Copy value
-            </Button>
-          </Stack>
-        }
-      />
-
-      <Card>
-        <CardHeader>
-          <CardTitle level={2}>Metadata</CardTitle>
-        </CardHeader>
-        <CardBody>
-          <VStack gap="ui" align="start">
-            <DetailRow label="Provider" value={entry.provider} />
-            <DetailRow label="Description" value={entry.description ?? '—'} />
-            <DetailRow
-              label="Capabilities"
-              value={entry.capabilities.length ? entry.capabilities.join(', ') : '—'}
-            />
-            <DetailRow
-              label="Available"
-              value={
-                entry.available
-                  ? 'The vault is open. This does not mean the key is valid — TEAvault never contacts a provider to find out.'
-                  : 'No'
-              }
-            />
-            <DetailRow
-              label="Access"
-              value={
-                entry.granted
-                  ? 'This client may request the value.'
-                  : 'This client may not request the value.'
-              }
-            />
-            <DetailRow
-              label="Discoverable"
-              value={
-                entry.hidden
-                  ? 'Hidden — listed only for clients that already hold a grant.'
-                  : 'Listed to any local client that can connect. The value still needs a grant.'
-              }
-            />
-          </VStack>
-        </CardBody>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle level={2}>Recent activity</CardTitle>
-          <CardDescription>Security events for this key. Values are never recorded.</CardDescription>
-        </CardHeader>
-        <CardBody>
-          {events.length === 0 ? (
-            <Text size="body" tone="muted">
-              Nothing recorded yet.
-            </Text>
-          ) : (
-            <VStack gap="none" align="start">
-              {events.map((e) => (
-                <Text key={e.seq} size="ui" tone="muted">
-                  {new Date(e.at).toLocaleString()} — {describeEvent(e)}
-                </Text>
-              ))}
-            </VStack>
-          )}
-        </CardBody>
-      </Card>
-    </VStack>
-  )
-}
-
-function DetailRow({ label, value }: { label: string; value: string }) {
-  return (
-    <Stack direction="horizontal" gap="section" align="baseline">
-      <Text size="ui" tone="muted">
-        {label}
-      </Text>
-      <Text size="body">{value}</Text>
-    </Stack>
-  )
-}
-
-function describeEvent(e: AuditEvent): string {
-  const kind = String(e.event.event ?? 'event')
-  switch (kind) {
-    case 'secret_released':
-      return 'the value was released to an approved client'
-    case 'secret_refused':
-      return `a release was refused (${String(e.event.reason ?? '')})`
-    case 'approval_requested':
-      return 'an approval was requested'
-    case 'approval_granted':
-      return 'an approval was granted'
-    case 'approval_denied':
-      return 'an approval was denied'
-    case 'key_copied':
-      return 'the value was copied to the clipboard'
-    default:
-      return kind.replace(/_/g, ' ')
   }
 }

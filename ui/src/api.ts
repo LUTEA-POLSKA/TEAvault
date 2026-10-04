@@ -95,8 +95,7 @@ export interface Status {
   locked: boolean
   entry_count: number
   pending_approvals: number
-  protocol: number
-  auto_lock_in: number | null
+protocol: number
   kdf: string
 }
 
@@ -174,25 +173,68 @@ export interface Grant {
   client_fingerprint: string
   client_label: string
   entry_id: string
-  project_dir?: string
   declared_purpose?: string
   mode: { mode: 'allow_once' } | { mode: 'always_allow'; expires_at: number | null } | { mode: 'deny' }
   granted_at: string
   consumed: boolean
 }
 
-export interface Settings {
-  auto_lock: { mode: 'never' } | { mode: 'after_seconds'; after_seconds: number }
+/** Settings exactly as the daemon stores them. */
+interface WireSettings {
   clipboard_clear_seconds: number
-  autostart: boolean
-  close_window_hides: boolean
   min_passphrase_chars: number
-  auto_backup_every_changes: number
   created_at: string
   updated_at: string
 }
 
+/** Settings as a control wants them. */
+export interface Settings {
+  clipboard_clear_seconds: number
+  min_passphrase_chars: number
+  created_at: string
+  updated_at: string
+}
+
+/** A client the daemon has seen connect. */
+export interface KnownClient {
+  fingerprint: string
+  label: string
+}
+
+/** One key together with the permissions that apply to it. */
+export interface Row {
+  entry: ApiKeyMetadata
+  grants: Grant[]
+}
+
 export type GrantModeWire = 'allow_once' | 'always_allow' | 'deny'
+
+function fromWire(w: WireSettings): Settings {
+  return {
+    clipboard_clear_seconds: w.clipboard_clear_seconds,
+    min_passphrase_chars: w.min_passphrase_chars,
+    created_at: w.created_at,
+    updated_at: w.updated_at,
+  }
+}
+
+function toWire(s: Settings): WireSettings {
+  return {
+    clipboard_clear_seconds: s.clipboard_clear_seconds,
+    min_passphrase_chars: s.min_passphrase_chars,
+    created_at: s.created_at,
+    updated_at: s.updated_at,
+  }
+}
+
+/** The access overview arrives as tuples; the UI wants named fields. */
+function toRows(rows: AccessRow[]): Row[] {
+  return rows.map(([entry, grants]) => ({ entry, grants }))
+}
+
+function toKnownClients(pairs: [string, string][]): KnownClient[] {
+  return pairs.map(([fingerprint, label]) => ({ fingerprint, label }))
+}
 
 // ----------------------------------------------------------------- commands
 
@@ -204,6 +246,8 @@ export const api = {
 
   unlock: (passphrase: string) => call<{ locked: boolean }>('unlock', { passphrase }),
   lock: () => call<{ locked: boolean }>('lock'),
+  /** Delete the vault and start over. The way out of a forgotten passphrase. */
+  wipe: () => call<{ wiped: boolean }>('wipe'),
 
   list: (provider?: string) =>
     call<{ entries: ListEntry[] }>('list', provider ? { provider } : {}),
@@ -219,28 +263,29 @@ export const api = {
 
   createEntry: (input: {
     name: string
-    displayName: string
+    display_name: string
     provider: string
-    description?: string
-    capabilities: string[]
+    description?: string | null
     hidden: boolean
     secret: string
   }) => call<ApiKeyMetadata>('create_entry', input),
 
-  updateEntry: (input: {
-    entry: string
-    displayName: string
-    provider: string
-    description?: string
-    capabilities: string[]
-    hidden: boolean
-    secret?: string
-  }) => call<ApiKeyMetadata>('update_entry', input),
+  updateEntry: (
+    entry: string,
+    input: {
+      display_name: string
+      provider: string
+      description?: string | null
+      hidden: boolean
+      secret?: string
+    },
+  ) => call<ApiKeyMetadata>('update_entry', { entry, ...input }),
 
   deleteEntry: (entry: string) => call<{ deleted: boolean }>('delete_entry', { entry }),
   copyToClipboard: (entry: string) => call<{ masked: string }>('copy_to_clipboard', { entry }),
 
-  accessOverview: () => call<AccessRow[]>('access_overview'),
+  accessOverview: () => call<AccessRow[]>('access_overview').then(toRows),
+  knownClients: () => call<[string, string][]>('known_clients').then(toKnownClients),
   grant: (input: {
     entry: string
     clientFingerprint: string
@@ -252,9 +297,13 @@ export const api = {
   revokeClient: (clientFingerprint: string) =>
     call<{ revoked: number }>('revoke_client', { clientFingerprint }),
 
-  getSettings: () => call<Settings>('get_settings'),
-  setSettings: (settings: Settings) => call<Settings>('set_settings', { settings }),
+  getSettings: () => call<WireSettings>('get_settings').then(fromWire),
+  setSettings: (settings: Settings) =>
+    call<WireSettings>('set_settings', { settings: toWire(settings) }).then(fromWire),
   auditRecent: (limit: number) => call<AuditEvent[]>('audit_recent', { limit }),
+
+  changePassphrase: (current: string, next: string) =>
+    call<{ changed: boolean }>('change_passphrase', { current, new: next }),
 
   backupExport: (path: string, passphrase: string) =>
     call<{ path: string }>('backup_export', { path, passphrase }),
@@ -265,7 +314,29 @@ export const api = {
 export interface AuditEvent {
   seq: number
   at: string
-  event: Record<string, unknown>
+  /**
+   * What happened.
+   *
+   * Nested, and not flattened into the parent: the Rust side is an internally
+   * tagged enum used as a *field*, and serde emits the tag inside the field's
+   * value rather than merging it into the surrounding object. So the name is
+   * `kind.event`, not `event`.
+   *
+   * That distinction is not academic. Reading `e.event` gave `undefined`, an
+   * unknown name then reached `undefined.replace(...)`, and the render threw —
+   * which emptied the window the moment the Activity tab was opened. The Rust
+   * side has a test pinning this shape; see `an_audit_event_carries_the_fields_
+   * the_activity_screen_reads`.
+   */
+  kind: {
+    /** snake_case name, e.g. `secret_released`. */
+    event: string
+    entry_id?: string
+    name?: string
+    reason?: string
+    request_id?: string
+    grant_id?: string
+  }
   client?: string
   prev_chain: string
   mac: string

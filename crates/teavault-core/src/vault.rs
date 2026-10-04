@@ -28,7 +28,7 @@
 //! err in.
 
 use crate::{
-    audit::{AuditEvent, AuditKind, AuditLog, PendingApproval},
+    audit::{AuditEvent, AuditKeyRing, AuditKind, AuditLog, ChainKeyProtector, PendingApproval},
     crypto::{keyring::Keyring, secret::SecretString},
     error::{DenyReason, Error, Result},
     model::{client::ClientIdentity, grant::*, ApiKeyMetadata, KnownProvider, Visibility},
@@ -37,6 +37,7 @@ use crate::{
     settings::Settings,
     storage::VaultStore,
 };
+use std::sync::Arc;
 
 /// Everything a caller can ask of the vault.
 pub struct Vault {
@@ -57,6 +58,10 @@ pub struct Vault {
     clipboard_clears: Vec<(String, String, i64)>,
     /// The identity clipboard operations act under.
     owner_identity: Option<ClientIdentity>,
+    /// Wraps the audit chain key for storage. `None` until the daemon installs
+    /// one, and the log then stays a bare hash chain — reported through
+    /// [`AuditLog::is_mac_backed`] rather than implied.
+    audit_protector: Option<Arc<dyn ChainKeyProtector>>,
 }
 
 impl std::fmt::Debug for Vault {
@@ -101,6 +106,7 @@ impl Vault {
             clipboard: None,
             clipboard_clears: Vec::new(),
             owner_identity: None,
+            audit_protector: None,
         })
     }
 
@@ -252,34 +258,6 @@ impl Vault {
         self.audit.append(AuditKind::PassphraseChanged, None)?;
         self.persist_audit()?;
         Ok(())
-    }
-
-    /// Record user activity, and lock if the idle timeout has passed.
-    ///
-    /// Called from the daemon's existing wake-ups, never from a timer — see
-    /// [`crate::session`] for why.
-    pub fn on_activity(&mut self) -> Result<bool> {
-        self.session.touch();
-        let due = self.auto_lock_due();
-        if due {
-            self.lock()?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
-    /// Lock when the idle timeout has elapsed. Cheap and side-effect-free
-    /// apart from locking, so it is safe to call from any request handler.
-    pub fn auto_lock_due(&mut self) -> bool {
-        if self.session.auto_lock_if_due(&self.settings.auto_lock) {
-            self.pending.clear();
-            let _ = self.audit.append(AuditKind::VaultLocked, None);
-            let _ = self.persist_audit();
-            true
-        } else {
-            false
-        }
     }
 
     // ------------------------------------------------------------ operations
@@ -664,7 +642,6 @@ impl Vault {
         _answering: &ClientIdentity,
         entry_id: &str,
         mode: GrantMode,
-        project_dir: Option<String>,
         purpose: Option<String>,
     ) -> Result<()> {
         let Some(pos) = self.pending.iter().position(|p| p.request_id == request_id) else {
@@ -691,7 +668,6 @@ impl Vault {
             entry_id.to_string(),
             mode.clone(),
         )
-        .with_project_dir(project_dir)
         .with_purpose(purpose.or(pending.declared_purpose.clone()));
 
         let grant_id = grant.id.clone();
@@ -839,15 +815,21 @@ impl Vault {
         let events = self.audit.clone().into_events();
         let bytes = serde_json::to_vec(&events)?;
         crate::storage::atomic::write_atomic(&self.paths.audit_log(), &bytes)?;
-        let head = serde_json::json!({
-            "format_version": crate::PROTOCOL_VERSION,
-            "protected_key": "",
-            "chain_head": self.audit.chain_head(),
-            "last_seq": self.audit.last_seq(),
-        });
+        let protected_key = match (self.audit_protector.as_deref(), self.audit.chain_key()) {
+            (Some(p), Some(key)) => p.protect(key)?,
+            // Either no protector or no key yet: record it honestly rather than
+            // writing an empty string that reads like a stored key.
+            _ => Vec::new(),
+        };
+        let keyring = AuditKeyRing {
+            format_version: crate::PROTOCOL_VERSION,
+            protected_key: crate::crypto::hex::encode(&protected_key),
+            chain_head: self.audit.chain_head().to_string(),
+            last_seq: self.audit.last_seq(),
+        };
         crate::storage::atomic::write_atomic(
             &self.paths.audit_keyring(),
-            &serde_json::to_vec(&head)?,
+            &serde_json::to_vec(&keyring)?,
         )?;
         Ok(())
     }
@@ -858,17 +840,24 @@ impl Vault {
             return Ok(0);
         };
         let events: Vec<AuditEvent> = serde_json::from_slice(&bytes)?;
-        let head = crate::storage::atomic::read_optional(&self.paths.audit_keyring())?
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .and_then(|v| {
-                v.get("chain_head")
-                    .and_then(|h| h.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| crate::audit::GENESIS.to_string());
-        let last_seq = events.last().map(|e| e.seq).unwrap_or(0);
+        let stored = crate::storage::atomic::read_optional(&self.paths.audit_keyring())?
+            .and_then(|b| serde_json::from_slice::<AuditKeyRing>(&b).ok())
+            .unwrap_or_else(|| AuditKeyRing::genesis(Vec::new()));
 
-        let log = AuditLog::restore(events, head, last_seq, None);
+        // Unwrap the chain key with whichever protector is installed. A keyring
+        // that cannot be unwrapped is not a reason to skip verification — the
+        // chain still has to check out — so it degrades to an unbacked log.
+        let key = match (
+            self.audit_protector.as_deref(),
+            crate::crypto::hex::decode(&stored.protected_key).ok(),
+        ) {
+            (Some(p), Some(blob)) if !blob.is_empty() => p
+                .unprotect(&blob)
+                .ok()
+                .map(|k| crate::crypto::secret::SecretBytes::new(k)),
+            _ => None,
+        };
+        let log = AuditLog::from_storage(events, Some(stored.chain_head), key)?;
         log.verify()?;
         let n = log.events().len();
         self.audit = log;
@@ -880,6 +869,17 @@ impl Vault {
     /// Attach a clipboard backend. Without one, copying a key fails loudly.
     pub fn set_clipboard(&mut self, clipboard: Box<dyn crate::clipboard::Clipboard>) {
         self.clipboard = Some(clipboard);
+    }
+
+    /// Install the platform's chain-key protector, so the audit log's MACs are
+    /// account-bound and survive a restart.
+    ///
+    /// Set by the daemon before the first event is written. Without it the log
+    /// is still a hash chain, but anyone able to edit the file can recompute it —
+    /// and [`AuditLog::is_mac_backed`] reports `false` so the weaker guarantee is
+    /// visible rather than implied.
+    pub fn set_audit_protector(&mut self, protector: Arc<dyn ChainKeyProtector>) {
+        self.audit_protector = Some(protector);
     }
 
     /// Refuse while locked, with the reason that is actually true.
@@ -1165,11 +1165,6 @@ impl Vault {
             Some(client_fingerprint.to_string()),
         )?;
         self.persist_audit()
-    }
-
-    /// Record owner activity, and lock if the idle timeout has passed.
-    pub fn note_activity(&mut self) -> Result<bool> {
-        self.on_activity()
     }
 
     /// Wipe the session on process exit.

@@ -14,12 +14,12 @@
       {
         "label": "main",
         "title": "TEAvault",
-        "width": 1120,
-        "height": 760,
-        "minWidth": 1120,
-        "maxWidth": 1120,
-        "minHeight": 760,
-        "maxHeight": 760,
+        "width": 940,
+        "height": 620,
+        "minWidth": 940,
+        "maxWidth": 940,
+        "minHeight": 620,
+        "maxHeight": 620,
         "resizable": false,
         "center": true,
         "visible": true,
@@ -40,7 +40,12 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "icon": ["icons/icon.ico"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
     "windows": {
       "nsis": {
         "installMode": "currentUser",

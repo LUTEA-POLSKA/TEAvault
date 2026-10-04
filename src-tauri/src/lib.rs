@@ -1,6 +1,6 @@
 //! The TEAvault desktop UI, as a Tauri shell.
 //!
-//! ## This crate holds no authority
+//! ## This crate holds no authority over the vault
 //!
 //! Every command below forwards a request to `teavaultd` over the named pipe and
 //! returns whatever the daemon decides. There is no crypto here, no permission
@@ -8,28 +8,55 @@
 //! daemon's `request` operation — which applies the same grant check it applies
 //! to the CLI and to any other local client.
 //!
-//! That is the point of the split. If the UI owned the vault, every XSS or
-//! dependency compromise in the frontend would be a key compromise. Here it is
-//! an inconvenience at worst, because the frontend is a *client* of a policy
-//! engine that does not know it exists.
+//! If the UI owned the vault, every XSS or dependency compromise in the frontend
+//! would be a key compromise. Here it is an inconvenience at worst, because the
+//! frontend is a *client* of a policy engine that does not know it exists.
 //!
-//! ## The window
+//! ## What the UI *is* trusted with
 //!
-//! Closing the window hides it; the daemon and the tray keep running. The
-//! web view is destroyed with the window, so nothing keeps a browser engine
-//! resident when the UI is closed — that is the low-idle requirement, and it is
-//! why this is a separate process from the daemon rather than a mode of it.
+//! The UI is in the **owner tier**: its image path is one of the two binaries the
+//! daemon expects next to itself, and that is what lets it create and edit keys,
+//! manage grants, change the passphrase and write backups. So the honest statement
+//! is not "the UI has no authority" but:
+//!
+//! > The UI is a trusted owner client. The daemon does not trust anything the
+//! > frontend *says* — it re-derives the identity from the pipe handle — and it
+//! > refuses every operation a grant cannot authorise. What the UI can do is
+//! > bounded by that tier, and two places inside the tier are additionally
+//! > constrained in the daemon, not in the frontend:
+//!
+//! * a **grant** can only be created for a client the daemon has actually seen
+//!   connect, with the label the daemon recorded rather than one the caller
+//!   supplied;
+//! * **secret release** always goes through `request`, so even the owner UI
+//!   cannot read a key without a grant — the same rule an agent faces.
+//!
+//! A compromised owner UI can therefore still create and delete keys and change
+//! settings. That is a deliberate trade: those are exactly the actions the UI
+//! exists for, and the alternative — a UI that could not manage its own vault —
+//! would move the authority into the daemon's own UI, which is a larger program
+//! with a browser engine in it, not a smaller one.
+//!
+//! ## The window is on demand
+//!
+//! Closing the window **ends this process**. The daemon and the tray keep running,
+//! which is what the low-idle goal actually requires: an open WebView2 is one of
+//! the most expensive things TEAvault owns, and there is no reason to keep one
+//! resident for a window nobody is looking at.
+//!
+//! The tray lives in the daemon only. Two tray icons — one per process — is a bug
+//! that looks like a feature, and it made "quit" ambiguous. A single named mutex
+//! means at most one UI process exists, and launching again focuses the existing
+//! window rather than opening a second one.
 
 mod commands;
+mod dialogs;
 mod fixed_size;
+mod single_instance;
 
 use std::sync::Mutex;
 
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager,
-};
+use tauri::Manager;
 
 use teavault_daemon::pipe::Client;
 
@@ -62,17 +89,26 @@ impl SharedClient {
     }
 }
 
-/// The tray menu labels, mirrored from the daemon's tray.
-const M_OPEN: &str = "Open TEAvault";
-const M_LOCK: &str = "Lock now";
-const M_SETTINGS: &str = "Settings";
-const M_QUIT: &str = "Quit TEAvault";
-
 /// Build and run the desktop UI.
 ///
 /// A thin `main` so the whole app lives in the library: that is what lets the
 /// crate be checked, reviewed and reasoned about without a window.
 pub fn run() {
+    // A second UI process would be a second WebView, a second pipe session and a
+    // second set of windows, with no way for the user to tell. The mutex is
+    // released when this process exits, so the next launch is free.
+    let _instance = match single_instance::acquire("TEAvaultUi-v1") {
+        Ok(handle) => handle,
+        Err(e) => {
+            dialogs::error(
+                None,
+                "TEAvault is already open",
+                &format!("{e}\n\nThe existing window is already showing your vault."),
+            );
+            std::process::exit(0);
+        }
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -81,6 +117,7 @@ pub fn run() {
             commands::init,
             commands::unlock,
             commands::lock,
+            commands::wipe,
             commands::list,
             commands::info,
             commands::request,
@@ -94,6 +131,7 @@ pub fn run() {
             commands::grant,
             commands::revoke_grant,
             commands::revoke_client,
+            commands::known_clients,
             commands::get_settings,
             commands::set_settings,
             commands::audit_recent,
@@ -110,80 +148,42 @@ pub fn run() {
                     app.manage(SharedClient(Mutex::new(c)));
                 }
                 Err(e) => {
-                    eprintln!("teavault: {e}");
-                    eprintln!("teavault: start the background process with `teavaultd`.");
+                    // A startup blocker, so it gets a real window rather than a
+                    // line on a console this build does not have. The UI is
+                    // closed afterwards: with no daemon there is nothing it can
+                    // do, and an inert window is a worse answer than none.
+                    dialogs::error(
+                        None,
+                        "TEAvault cannot reach its background process",
+                        &format!(
+                            "{e}\n\nStart it and try again:\n\n    teavaultd.exe"
+                        ),
+                    );
+                    app.handle().exit(0);
                 }
             }
-            build_tray(app.handle())?;
             fixed_size::apply(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Hiding, not closing: the daemon and tray must outlive the
-                // window. Quitting is an explicit tray action.
-                api.prevent_close();
-                let _ = window.hide();
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // Exiting, not hiding. The daemon and its tray outlive this
+                // process, and the WebView2 instance — by far the most expensive
+                // resource TEAvault owns — goes with it. Closing the window is
+                // what the user meant.
+                //
+                // The close is not prevented, so the default teardown runs and
+                // `Drop` for the pipe client closes the handle.
+                let app = window.app_handle().clone();
+                window.close().ok();
+                std::thread::spawn(move || {
+                    // Give the close event a moment to finish tearing the web
+                    // view down before asking the process to exit.
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    app.exit(0);
+                });
             }
         })
         .run(tauri::generate_context!())
         .expect("the TEAvault UI must start");
-}
-
-fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", M_OPEN, true, None::<&str>)?;
-    let lock = MenuItem::with_id(app, "lock", M_LOCK, true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", M_SETTINGS, true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", M_QUIT, true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &lock, &settings, &quit])?;
-
-    TrayIconBuilder::with_id("teavault")
-        .menu(&menu)
-        .tooltip("TEAvault")
-        .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id.as_ref() {
-            "open" | "settings" => show_window(app),
-            "lock" => {
-                // The daemon owns the session, so locking is a message it sends
-                // rather than something the UI does to itself. If the daemon is
-                // not running there is nothing to lock.
-                if let Some(client) = app.try_state::<SharedClient>() {
-                    let _ = client.send(teavault_core::ipc::Request::new(
-                        "lock",
-                        teavault_core::ipc::Operation::Lock,
-                    ));
-                }
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
-                }
-            }
-            "quit" => app.exit(0),
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                show_window(tray.app_handle());
-            }
-        })
-        .build(app)?;
-    Ok(())
-}
-
-/// Bring the main window forward, creating nothing.
-///
-/// Used by the tray's Open action. The window is created eagerly at startup and
-/// hidden only on close, so this is a show + focus rather than a create — which
-/// is what keeps the WebView alive between openings instead of paying to
-/// rebuild it every time.
-fn show_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
 }
