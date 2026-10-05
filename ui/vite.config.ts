@@ -16,18 +16,43 @@ import react from '@vitejs/plugin-react'
  * What the browser build cannot show, so it is not mistaken for coverage:
  * window dragging, minimise, close-to-tray, the tray icon, the real clipboard,
  * and the Argon2id unlock delay. Layout is judged inside the fixed-size frame in
- * `index.web.html`, which the dev server serves at
- * `http://localhost:5180/index.web.html` — that file, not `index.html`, because
- * the shipped document carries a Content-Security-Policy that blocks the dev
- * server's inline styles. `vite build` is unaffected and still uses `index.html`.
+ * `index.web.html`, which the dev server serves at `/` in this mode — see
+ * `webEntry` below for why that is a rewrite and not just a second document.
+ * `vite build` is unaffected and still uses `index.html`.
  */
+/**
+ * Serve `index.web.html` at `/` in the browser build.
+ *
+ * Vite prints `http://localhost:5180/`, and that is where a browser opens. Left
+ * alone, `/` serves `index.html` — the shipped document, whose
+ * Content-Security-Policy blocks the dev server's inline styles and HMR client.
+ * The page then renders unstyled, which looks exactly like a broken build.
+ *
+ * Rewriting the request rather than printing a different URL keeps the address
+ * Vite advertises the address that works, and keeps `index.web.html` as the only
+ * place the frame is described. Dev-only: `vite build` never runs this.
+ */
+function webEntry() {
+  return {
+    name: 'teavault-web-entry',
+    configureServer(server) {
+      server.middlewares.use((req, _res, next) => {
+        if (req.url === '/' || req.url === '/index.html') {
+          req.url = '/index.web.html'
+        }
+        next()
+      })
+    },
+  }
+}
+
 const stub = (name: string) => fileURLToPath(new URL(`./web/${name}`, import.meta.url))
 
 export default defineConfig(({ mode }) => {
   const web = mode === 'web'
 
   return {
-    plugins: [react()],
+    plugins: [react(), ...(web ? [webEntry()] : [])],
     clearScreen: false,
     resolve: web
       ? {
