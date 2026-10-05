@@ -60,7 +60,7 @@ rather than leaving a bare timeout.
 | Owner tier | path-based; a copied binary elsewhere is refused |
 | Daemon | event-driven, no polling, tray, clipboard clear-if-unchanged |
 | CLI | `init unlock lock status list info request use run pending approve deny` |
-| UI | React + TEAui only; main, detail, access, activity, settings screens |
+| UI | React + TEAui only; keys, access, activity, settings panels |
 | Idle | ~5.5 MiB working set idle; ~100 ms Argon2id unlock — see `BENCHMARKS.md` |
 
 ## Not done
@@ -92,8 +92,9 @@ response body. That list is why it is a later phase.
   path comparison rather than a signature check.
 - **Windows 10 is not tested.** Only Windows 11 was used. Nothing in the code
   should require 11, but nothing proves it.
-- **The tray icon is drawn by the shell**, using `IDI_APPLICATION`. A real `.ico`
-  is generated at build time only because Tauri requires one.
+- **The tray icon is a real embedded ICO**, not a system placeholder. The shell
+  draws it from the embedded bytes; the `.ico` is generated at build time and
+  the tray code parses it to pick the right frame for the DPI.
 
 ### Known weaknesses
 

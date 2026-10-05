@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" data-theme="tea" data-density="default">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      The browser dev build. Same application, same entry point as index.html —
+      the only difference is the Vite alias that replaces Tauri's IPC with a
+      stub, so nothing here is app-specific.
+
+      No Content-Security-Policy: the app document sets one, and a dev server
+      needs inline styles and an eval-based HMR client that a strict policy would
+      block. This file is never shipped — `vite build` uses index.html.
+    -->
+    <title>TEAvault — web dev</title>
+    <style>
+      /*
+        The real window is 940x620 and cannot be resized. The browser tab
+        usually is not that size, so the frame below presents exactly the
+        viewport the application will get. Layout decisions judged here are
+        therefore the ones that will hold in the app; judged in a full-width tab
+        they would not be.
+
+        The surrounding page is deliberately plain: nothing decorative, so
+        nothing in the chrome can be mistaken for part of the product.
+      */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #14161a;
+      }
+
+      #root {
+        width: 940px;
+        height: 620px;
+        margin: 0 auto;
+        overflow: hidden;
+        box-shadow: 0 0 0 1px #2c3038;
+      }
+
+      /* Below the real size the frame would overflow, so it scrolls rather than
+         squashing — a squashed frame would lie about the layout. */
+      @media (max-width: 940px), (max-height: 620px) {
+        body {
+          overflow: auto;
+        }
+        #root {
+          margin: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

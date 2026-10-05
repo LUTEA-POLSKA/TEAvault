@@ -3,6 +3,9 @@
 node_modules
 dist
 dist-ssr
+# The browser dev build's output (`vite build --mode web`, used only to verify
+# the IPC stub is wired). Never shipped.
+dist-web
 *.local
 .vite
 

@@ -145,7 +145,7 @@ fn accept_loop(shared: &Arc<Shared>, own_pid: u32, own_path: &str, pipe_name: &s
             return;
         }
 
-        let instance = match PipeInstance::create_named(&pipe_name) {
+        let instance = match PipeInstance::create_named(pipe_name) {
             Ok(i) => i,
             Err(e) => {
                 eprintln!("teavaultd: pipe: {e}");

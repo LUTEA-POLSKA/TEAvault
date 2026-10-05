@@ -854,7 +854,7 @@ impl Vault {
             (Some(p), Some(blob)) if !blob.is_empty() => p
                 .unprotect(&blob)
                 .ok()
-                .map(|k| crate::crypto::secret::SecretBytes::new(k)),
+                .map(crate::crypto::secret::SecretBytes::new),
             _ => None,
         };
         let log = AuditLog::from_storage(events, Some(stored.chain_head), key)?;
