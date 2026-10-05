@@ -401,6 +401,7 @@ onBackup={async (file, passphrase) => {
                   description: input.description,
                   hidden: input.hidden,
                   secret: input.secret ?? '',
+                  capabilities: input.capabilities,
                 })
               }
               await refresh()

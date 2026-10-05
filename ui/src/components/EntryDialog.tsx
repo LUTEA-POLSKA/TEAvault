@@ -62,6 +62,7 @@ export function EntryDialog({
   const [description, setDescription] = useState(entry?.description ?? '')
   const [secret, setSecret] = useState('')
   const [hidden, setHidden] = useState(entry?.hidden ?? false)
+  const [capabilities, setCapabilities] = useState('')
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
 
@@ -91,6 +92,10 @@ export function EntryDialog({
         description: description.trim() || null,
         hidden,
         secret: secret.trim() || null,
+        capabilities: capabilities
+          .split(',')
+          .map((c) => c.trim())
+          .filter((c) => c.length > 0),
       })
     } catch (err) {
       onError(err)
@@ -205,6 +210,18 @@ export function EntryDialog({
             />
           </LabelledField>
 
+          <LabelledField
+            label="Capabilities"
+            description="What this key can do. Comma-separated, e.g. llm, embeddings."
+          >
+            <Input
+              className={INPUT_CLASS}
+              value={capabilities}
+              onChange={(e) => setCapabilities(e.target.value)}
+              placeholder="llm, embeddings"
+            />
+          </LabelledField>
+
           <div>
             <Switch checked={hidden} onCheckedChange={setHidden} label="Hidden until approved" />
             <Text size="ui" tone="subtle" className="block">
@@ -226,6 +243,7 @@ export interface EntryInput {
   description: string | null
   hidden: boolean
   secret: string | null
+  capabilities: string[]
 }
 
 /** The note shown after a copy, with the countdown the user asked about. */

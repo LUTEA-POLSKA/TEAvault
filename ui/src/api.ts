@@ -268,6 +268,7 @@ export const api = {
     description?: string | null
     hidden: boolean
     secret: string
+    capabilities: string[]
   }) => call<ApiKeyMetadata>('create_entry', input),
 
   updateEntry: (

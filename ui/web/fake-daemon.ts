@@ -393,7 +393,7 @@ const handlers: Record<string, (args: Args) => unknown> = {
       display_name: optStr(args, 'display_name') ?? name,
       provider: str(args, 'provider'),
       ...(optStr(args, 'description') ? { description: optStr(args, 'description') } : {}),
-      capabilities: strList(args, 'capabilities'),
+      capabilities: args.capabilities === undefined ? [] : strList(args, 'capabilities'),
       created_at: now,
       updated_at: now,
       visibility: bool(args, 'hidden') ? 'hidden' : 'discoverable',
