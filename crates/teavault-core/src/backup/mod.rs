@@ -322,6 +322,7 @@ mod tests {
             created_at: crate::model::now_rfc3339(),
             updated_at: crate::model::now_rfc3339(),
             visibility: Visibility::Discoverable,
+            category: None,
         };
         store
             .update_index(dek, |ix| {

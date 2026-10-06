@@ -67,6 +67,8 @@ pub struct ApiKeyMetadata {
     pub updated_at: String,
     /// Whether an ungranted client may see this entry in `list`.
     pub visibility: Visibility,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// Whether an entry is advertised to clients that hold no grant for it.
@@ -204,6 +206,7 @@ mod tests {
             created_at: now_rfc3339(),
             updated_at: now_rfc3339(),
             visibility: Visibility::Discoverable,
+            category: None,
         })
         .unwrap();
         assert!(!json.contains("secret"));

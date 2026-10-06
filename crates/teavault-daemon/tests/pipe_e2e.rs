@@ -88,6 +88,7 @@ fn lock_server() -> (Arc<Shared>, MutexGuard<'static, ()>) {
                 vec!["llm".into()],
                 Visibility::Discoverable,
                 teavault_core::crypto::SecretString::new(b"sk-e2e-not-a-real-key".to_vec()),
+                None,
             )
             .expect("create entry");
         vault
@@ -99,6 +100,7 @@ fn lock_server() -> (Arc<Shared>, MutexGuard<'static, ()>) {
                 vec![],
                 Visibility::Discoverable,
                 teavault_core::crypto::SecretString::new(b"sk-never-released".to_vec()),
+                None,
             )
             .expect("create entry");
         vault
@@ -110,6 +112,7 @@ fn lock_server() -> (Arc<Shared>, MutexGuard<'static, ()>) {
                 vec![],
                 Visibility::Discoverable,
                 teavault_core::crypto::SecretString::new(b"sk-denied-secret".to_vec()),
+                None,
             )
             .expect("create entry");
 

@@ -260,6 +260,7 @@ mod tests {
             created_at: crate::model::now_rfc3339(),
             updated_at: crate::model::now_rfc3339(),
             visibility: crate::model::Visibility::Discoverable,
+            category: None,
         }
     }
 

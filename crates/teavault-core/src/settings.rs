@@ -140,8 +140,8 @@ mod tests {
         );
     }
 
-#[test]
-fn a_passphrase_minimum_below_eight_is_rejected() {
+    #[test]
+    fn a_passphrase_minimum_below_eight_is_rejected() {
         let s = Settings {
             min_passphrase_chars: 4,
             ..Default::default()

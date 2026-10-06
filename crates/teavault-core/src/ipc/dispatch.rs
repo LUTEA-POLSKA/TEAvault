@@ -173,6 +173,7 @@ impl<'v> Dispatcher<'v> {
                     created_at: meta.created_at,
                     updated_at: meta.updated_at,
                     grants,
+                    category: meta.category,
                 })?)
             }
 
@@ -219,6 +220,7 @@ impl<'v> Dispatcher<'v> {
                 capabilities,
                 hidden,
                 secret,
+                category,
             } => {
                 let entry = self.vault.create_entry(
                     name,
@@ -232,6 +234,7 @@ impl<'v> Dispatcher<'v> {
                         Visibility::Discoverable
                     },
                     crate::crypto::SecretString::new(secret.as_bytes().to_vec()),
+                    category.clone(),
                 )?;
                 Ok(serde_json::to_value(entry)?)
             }
@@ -244,6 +247,7 @@ impl<'v> Dispatcher<'v> {
                 capabilities,
                 hidden,
                 secret,
+                category,
             } => {
                 let id = self.vault.resolve_entry_id(entry)?;
                 let updated = self.vault.update_entry(
@@ -257,6 +261,7 @@ impl<'v> Dispatcher<'v> {
                     } else {
                         Visibility::Discoverable
                     },
+                    category.clone(),
                 )?;
                 if let Some(s) = secret {
                     self.vault.update_secret(
@@ -379,6 +384,7 @@ impl<'v> Dispatcher<'v> {
             description: e.description.clone(),
             granted: self.vault.is_granted(&caller.identity.fingerprint(), &e.id),
             hidden: e.visibility == Visibility::Hidden,
+            category: e.category.clone(),
         }
     }
 

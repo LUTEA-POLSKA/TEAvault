@@ -110,6 +110,7 @@ export interface ListEntry {
   description?: string
   granted: boolean
   hidden: boolean
+  category?: string
 }
 
 export interface GrantView {
@@ -133,6 +134,7 @@ export interface InfoResult {
   created_at: string
   updated_at: string
   grants: GrantView[]
+  category?: string
 }
 
 /**
@@ -166,6 +168,7 @@ export interface ApiKeyMetadata {
   created_at: string
   updated_at: string
   visibility: 'discoverable' | 'hidden'
+  category?: string
 }
 
 export interface Grant {
@@ -269,6 +272,7 @@ export const api = {
     hidden: boolean
     secret: string
     capabilities: string[]
+    category?: string | null
   }) => call<ApiKeyMetadata>('create_entry', input),
 
   updateEntry: (
@@ -279,6 +283,8 @@ export const api = {
       description?: string | null
       hidden: boolean
       secret?: string
+      capabilities?: string[]
+      category?: string | null
     },
   ) => call<ApiKeyMetadata>('update_entry', { entry, ...input }),
 

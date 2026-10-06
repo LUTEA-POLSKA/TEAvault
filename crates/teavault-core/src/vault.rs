@@ -452,6 +452,7 @@ impl Vault {
         capabilities: Vec<String>,
         visibility: Visibility,
         secret: SecretString,
+        category: Option<String>,
     ) -> Result<ApiKeyMetadata> {
         self.session.deny_if_locked()?;
         crate::model::validate_var_name(name)?;
@@ -473,6 +474,7 @@ impl Vault {
             created_at: crate::model::now_rfc3339(),
             updated_at: crate::model::now_rfc3339(),
             visibility,
+            category,
         };
         let id = entry.id.clone();
 
@@ -500,6 +502,7 @@ impl Vault {
     }
 
     /// Update an entry's metadata. The secret is untouched.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_entry(
         &mut self,
         entry_id: &str,
@@ -508,6 +511,7 @@ impl Vault {
         description: Option<String>,
         capabilities: Vec<String>,
         visibility: Visibility,
+        category: Option<String>,
     ) -> Result<ApiKeyMetadata> {
         self.session.deny_if_locked()?;
         let dek = self.session.require_dek()?;
@@ -527,6 +531,7 @@ impl Vault {
                 e.description = description;
                 e.capabilities = capabilities;
                 e.visibility = visibility;
+                e.category = category;
                 e.updated_at = crate::model::now_rfc3339();
                 Ok(e.clone())
             })?;

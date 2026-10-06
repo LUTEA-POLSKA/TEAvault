@@ -186,6 +186,7 @@ function toListEntry(e: ApiKeyMetadata): ListEntry {
     capabilities: e.capabilities,
     display_name: e.display_name,
     ...(e.description ? { description: e.description } : {}),
+    ...(e.category ? { category: e.category } : {}),
     granted: liveGrant(e.id) !== undefined,
     hidden: e.visibility === 'hidden',
   }
@@ -394,6 +395,7 @@ const handlers: Record<string, (args: Args) => unknown> = {
       provider: str(args, 'provider'),
       ...(optStr(args, 'description') ? { description: optStr(args, 'description') } : {}),
       capabilities: args.capabilities === undefined ? [] : strList(args, 'capabilities'),
+      ...(optStr(args, 'category') ? { category: optStr(args, 'category') } : {}),
       created_at: now,
       updated_at: now,
       visibility: bool(args, 'hidden') ? 'hidden' : 'discoverable',
@@ -416,6 +418,11 @@ const handlers: Record<string, (args: Args) => unknown> = {
     if (provider !== undefined) meta.provider = provider
     if (description !== undefined) meta.description = description
     if (capabilities !== undefined) meta.capabilities = capabilities
+    if (args.category !== undefined) {
+      const c = optStr(args, 'category')
+      if (c === undefined || c === '') delete meta.category
+      else meta.category = c
+    }
     if (args.hidden !== undefined) {
       meta.visibility = bool(args, 'hidden') ? 'hidden' : 'discoverable'
     }

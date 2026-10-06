@@ -41,6 +41,9 @@ import { LabelledField } from './LabelledField'
 import { EmptyState } from './Empty'
 import type { ListEntry } from '../api'
 
+/** The group shown for entries without a category, and the drop target for clearing one. */
+const UNCATEGORIZED = 'Uncategorized'
+
 export function KeysPanel({
   entries,
   pendingCount,
@@ -49,6 +52,7 @@ export function KeysPanel({
   onCopy,
   onDelete,
   onGoToAccess,
+  onSetCategory,
 }: {
   entries: ListEntry[]
   pendingCount: number
@@ -57,9 +61,11 @@ export function KeysPanel({
   onCopy: (e: ListEntry) => void
   onDelete: (e: ListEntry) => void
   onGoToAccess: () => void
+  onSetCategory: (e: ListEntry, category: string | null) => void
 }) {
   const [query, setQuery] = useState('')
   const [confirming, setConfirming] = useState<ListEntry | null>(null)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -71,6 +77,34 @@ export function KeysPanel({
         (e.description ?? '').toLowerCase().includes(q),
     )
   }, [entries, query])
+
+  // Group the filtered keys by category. Uncategorized is a real group (the
+  // drop target for "clear the category"), so it is always present.
+  const grouped = useMemo(() => {
+    const byCat = new Map<string, ListEntry[]>()
+    for (const e of visible) {
+      const key = e.category && e.category.trim() !== '' ? e.category : UNCATEGORIZED
+      const bucket = byCat.get(key)
+      if (bucket) bucket.push(e)
+      else byCat.set(key, [e])
+    }
+    const names = [...byCat.keys()].sort((a, b) => a.localeCompare(b))
+    if (!names.includes(UNCATEGORIZED)) names.push(UNCATEGORIZED)
+    return names.map((name) => ({ name, items: byCat.get(name) ?? [] }))
+  }, [visible])
+
+  function dropOn(category: string | null) {
+    return function handleDrop(e: React.DragEvent) {
+      e.preventDefault()
+      const id = e.dataTransfer.getData('text/plain')
+      setDraggingId(null)
+      const target = entries.find((x) => x.id === id)
+      if (!target) return
+      const current = target.category && target.category.trim() !== '' ? target.category : UNCATEGORIZED
+      if (current === (category ?? UNCATEGORIZED)) return
+      onSetCategory(target, category)
+    }
+  }
 
   if (entries.length === 0) {
     return (
@@ -154,16 +188,51 @@ export function KeysPanel({
           No key matches “{query}”.
         </Text>
       ) : (
-        <Stack gap="none" role="list" style={{ border: '1px solid var(--tea-line)', borderRadius: '6px', overflow: 'hidden' }}>
-          {visible.map((e, i) => (
-            <KeyRow
-              key={e.id}
-              entry={e}
-              first={i === 0}
-              onEdit={onEdit}
-              onCopy={onCopy}
-              onDelete={() => setConfirming(e)}
-            />
+        <Stack gap="md" style={{ minHeight: 0 }}>
+          {grouped.map(({ name, items }) => (
+            <div
+              key={name}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={dropOn(name === UNCATEGORIZED ? null : name)}
+            >
+              <GroupHeader
+                name={name}
+                count={items.length}
+                active={draggingId !== null}
+              />
+              {items.length > 0 ? (
+                <Stack gap="none" role="list" style={{ border: '1px solid var(--tea-line)', borderRadius: '6px', overflow: 'hidden' }}>
+                  {items.map((e, i) => (
+                    <KeyRow
+                      key={e.id}
+                      entry={e}
+                      first={i === 0}
+                      dragging={draggingId === e.id}
+                      onDragStart={() => setDraggingId(e.id)}
+                      onDragEnd={() => setDraggingId(null)}
+                      onEdit={onEdit}
+                      onCopy={onCopy}
+                      onDelete={() => setConfirming(e)}
+                    />
+                  ))}
+                </Stack>
+              ) : (
+                // An empty group is still a drop target: the user can drag a key
+                // here to clear its category (Uncategorized) or to start one.
+                <Stack
+                  gap="none"
+                  style={{
+                    border: `1px dashed ${draggingId !== null ? 'var(--tea-focus)' : 'var(--tea-line)'}`,
+                    borderRadius: '6px',
+                    padding: '10px 12px',
+                  }}
+                >
+                  <Text size="ui" tone="muted">
+                    Drop a key here to move it to “{name}”
+                  </Text>
+                </Stack>
+              )}
+            </div>
           ))}
         </Stack>
       )}
@@ -171,15 +240,49 @@ export function KeysPanel({
   )
 }
 
+function GroupHeader({ name, count, active }: { name: string; count: number; active: boolean }) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px',
+        padding: '6px 2px',
+      }}
+    >
+      <Text size="label" weight="semibold" as="span">
+        {name}
+      </Text>
+      <Badge
+        variant="subtle"
+        tone={name === UNCATEGORIZED ? 'neutral' : 'info'}
+      >
+        {count}
+      </Badge>
+      {active && (
+        <Text size="ui" tone="subtle">
+          drop to move here
+        </Text>
+      )}
+    </div>
+  )
+}
+
 function KeyRow({
   entry,
   first,
+  dragging,
+  onDragStart,
+  onDragEnd,
   onEdit,
   onCopy,
   onDelete,
 }: {
   entry: ListEntry
   first: boolean
+  dragging: boolean
+  onDragStart: () => void
+  onDragEnd: () => void
   onEdit: (e: ListEntry) => void
   onCopy: (e: ListEntry) => void
   onDelete: () => void
@@ -187,13 +290,22 @@ function KeyRow({
   return (
     <div
       role="listitem"
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData('text/plain', entry.id)
+        e.dataTransfer.effectAllowed = 'move'
+        onDragStart()
+      }}
+      onDragEnd={onDragEnd}
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: '12px',
         padding: '8px 12px',
         borderTop: first ? 'none' : '1px solid var(--tea-line)',
-        background: 'var(--tea-surface)',
+        background: dragging ? 'var(--tea-surface-hover)' : 'var(--tea-surface)',
+        cursor: 'grab',
+        opacity: dragging ? 0.5 : 1,
       }}
     >
       <div style={{ minWidth: 0, flex: 1 }}>

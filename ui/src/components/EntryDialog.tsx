@@ -24,7 +24,7 @@
  * correct classes, so the styling is not a thing this file has to get right.
  */
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Alert,
   Button,
@@ -38,6 +38,7 @@ import {
   Textarea,
 } from '@tea-ui/core'
 import type { ListEntry } from '../api'
+import { suggestCategory } from '../utils/category'
 import { LabelledField } from './LabelledField'
 import { Modal } from './Modal'
 
@@ -46,12 +47,14 @@ const INPUT_CLASS = 'w-full'
 export function EntryDialog({
   entry,
   providers,
+  categories,
   onClose,
   onSave,
   onError,
 }: {
   entry: ListEntry | null
   providers: string[]
+  categories: string[]
   onClose: () => void
   onSave: (input: EntryInput) => Promise<void>
   onError: (e: unknown) => void
@@ -62,12 +65,20 @@ export function EntryDialog({
   const [description, setDescription] = useState(entry?.description ?? '')
   const [secret, setSecret] = useState('')
   const [hidden, setHidden] = useState(entry?.hidden ?? false)
+  const [category, setCategory] = useState(entry?.category ?? '')
   const [capabilities, setCapabilities] = useState('')
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
 
   const editing = entry !== null
   const nameValid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(name)
+
+  // Advisory only: shown when the category is empty and the name suggests one.
+  // Applying it just fills the field; it never overrides a manual choice.
+  const suggested = useMemo(() => {
+    if (category.trim() !== '') return null
+    return suggestCategory(name || (entry?.name ?? ''))
+  }, [category, name, entry?.name])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -96,6 +107,7 @@ export function EntryDialog({
           .split(',')
           .map((c) => c.trim())
           .filter((c) => c.length > 0),
+        category: category.trim() || null,
       })
     } catch (err) {
       onError(err)
@@ -192,6 +204,42 @@ export function EntryDialog({
             />
           </LabelledField>
 
+          <div>
+            {category.trim() === '' && suggested && (
+              <HStack gap="ui" align="center" className="mb-1" aria-live="polite">
+                <Text size="ui" tone="subtle">
+                  Suggested from the name: {suggested}
+                </Text>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  type="button"
+                  onClick={() => setCategory(suggested)}
+                >
+                  Apply
+                </Button>
+              </HStack>
+            )}
+            <LabelledField
+              label="Category"
+              description="Optional. Groups keys on the list, e.g. llm, ci. Free text — you can type your own."
+            >
+              <Input
+                className={INPUT_CLASS}
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                list="teavault-categories"
+                placeholder="llm"
+              />
+            </LabelledField>
+            {/* Existing categories, so the user picks rather than retypes. */}
+            <datalist id="teavault-categories">
+              {categories.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
+          </div>
+
           <LabelledField
             label={editing ? 'Replace the value' : 'Key value'}
             description={
@@ -244,6 +292,7 @@ export interface EntryInput {
   hidden: boolean
   secret: string | null
   capabilities: string[]
+  category?: string | null
 }
 
 /** The note shown after a copy, with the countdown the user asked about. */

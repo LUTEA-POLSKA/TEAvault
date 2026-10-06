@@ -31,6 +31,7 @@ fn fixture() -> (tempfile::TempDir, Vault, OwnerCheck) {
             vec!["llm".into(), "embeddings".into()],
             teavault_core::model::Visibility::Discoverable,
             teavault_core::crypto::SecretString::new(b"sk-openai-value-0001".to_vec()),
+            None,
         )
         .unwrap();
 
@@ -43,6 +44,7 @@ fn fixture() -> (tempfile::TempDir, Vault, OwnerCheck) {
             vec!["internal".into()],
             teavault_core::model::Visibility::Hidden,
             teavault_core::crypto::SecretString::new(b"internal-secret-0002".to_vec()),
+            None,
         )
         .unwrap();
 
@@ -62,6 +64,116 @@ fn owner() -> Caller {
         1,
         r"C:\Program Files\TEAvault\teavault-app.exe",
     ))
+}
+
+#[test]
+fn a_category_roundtrips_through_create_update_and_list() {
+    let (_dir, mut vault, _oc) = fixture();
+
+    let created = vault
+        .create_entry(
+            "CATEGORY_TOUR_KEY",
+            "Category",
+            "OpenAI",
+            None,
+            vec!["llm".into()],
+            teavault_core::model::Visibility::Discoverable,
+            teavault_core::crypto::SecretString::new(b"sk-x".to_vec()),
+            Some("llm".into()),
+        )
+        .unwrap();
+    assert_eq!(created.category.as_deref(), Some("llm"));
+
+    let moved = vault
+        .update_entry(
+            &created.id,
+            "OpenAI",
+            "OpenAI",
+            None,
+            vec!["llm".into()],
+            teavault_core::model::Visibility::Discoverable,
+            Some("ci".into()),
+        )
+        .unwrap();
+    assert_eq!(moved.category.as_deref(), Some("ci"));
+
+    // Moving back to Uncategorized clears the field rather than leaving "".
+    let cleared = vault
+        .update_entry(
+            &created.id,
+            "OpenAI",
+            "OpenAI",
+            None,
+            vec!["llm".into()],
+            teavault_core::model::Visibility::Discoverable,
+            None,
+        )
+        .unwrap();
+    assert_eq!(cleared.category, None);
+}
+
+#[test]
+fn list_carries_the_category_but_never_the_secret() {
+    let (dir, mut vault, owner_check) = fixture();
+
+    // Seed one categorised entry and one without.
+    let _ = vault
+        .create_entry(
+            "CI_DEPLOY_KEY",
+            "Deploy",
+            "GitHub",
+            None,
+            vec!["ci".into()],
+            teavault_core::model::Visibility::Discoverable,
+            teavault_core::crypto::SecretString::new(b"sk-ci".to_vec()),
+            Some("ci".into()),
+        )
+        .unwrap();
+    let _ = vault
+        .create_entry(
+            "MISC_KEY",
+            "Misc",
+            "Other",
+            None,
+            vec![],
+            teavault_core::model::Visibility::Discoverable,
+            teavault_core::crypto::SecretString::new(b"sk-misc".to_vec()),
+            None,
+        )
+        .unwrap();
+
+    let listed = call(
+        &mut vault,
+        &owner_check,
+        &owner(),
+        Operation::List { provider: None },
+    );
+    let entries = listed
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap();
+    let by_name = |name: &str| {
+        entries
+            .iter()
+            .find(|e| e.get("name").and_then(|n| n.as_str()) == Some(name))
+            .unwrap()
+            .clone()
+    };
+
+    assert_eq!(
+        by_name("CI_DEPLOY_KEY")
+            .get("category")
+            .and_then(|c| c.as_str()),
+        Some("ci")
+    );
+    assert_eq!(by_name("MISC_KEY").get("category"), None);
+    for e in &entries {
+        let json = e.to_string();
+        assert!(!json.contains("sk-"), "list must not leak a secret");
+    }
+
+    let _ = dir;
 }
 
 fn call(
@@ -260,6 +372,7 @@ fn an_unknown_client_gets_nothing_at_all() {
                 capabilities: vec![],
                 hidden: false,
                 secret: "value".into(),
+                category: None,
             }
         )
         .code,
@@ -576,6 +689,7 @@ fn a_restart_comes_up_locked() {
             vec![],
             teavault_core::model::Visibility::Discoverable,
             teavault_core::crypto::SecretString::new(b"value".to_vec()),
+            None,
         )
         .unwrap();
         assert!(v.is_unlocked());

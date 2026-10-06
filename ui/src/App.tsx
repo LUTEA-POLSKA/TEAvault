@@ -287,6 +287,24 @@ locked={locked}
                   if (r !== null) toast({ title: `${e.name} deleted` })
                 }}
                 onGoToAccess={() => setView('access')}
+                onSetCategory={async (e, category) => {
+                  const done = await guard('moved', async () => {
+                    await api.updateEntry(e.id, {
+                      display_name: e.display_name,
+                      provider: e.provider,
+                      description: e.description,
+                      hidden: e.hidden,
+                      capabilities: e.capabilities,
+                      category,
+                    })
+                    await refresh()
+                  })
+                  if (done !== null) {
+                    toast({
+                      title: category ? `Moved to ${category}` : 'Removed from its category',
+                    })
+                  }
+                }}
               />
             )}
 
@@ -381,6 +399,7 @@ onBackup={async (file, passphrase) => {
         <EntryDialog
           entry={editing === 'new' ? null : editing}
           providers={PROVIDERS}
+          categories={[...new Set(entries.map((e) => e.category).filter((c): c is string => typeof c === 'string' && c.length > 0))].sort()}
           onClose={() => setEditing(null)}
           onError={report}
           onSave={async (input: EntryInput) => {
@@ -392,6 +411,7 @@ onBackup={async (file, passphrase) => {
                   description: input.description,
                   hidden: input.hidden,
                   secret: input.secret ?? undefined,
+                  category: input.category ?? undefined,
                 })
               } else {
                 await api.createEntry({
@@ -402,6 +422,7 @@ onBackup={async (file, passphrase) => {
                   hidden: input.hidden,
                   secret: input.secret ?? '',
                   capabilities: input.capabilities,
+                  category: input.category ?? undefined,
                 })
               }
               await refresh()

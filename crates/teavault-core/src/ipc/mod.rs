@@ -138,6 +138,8 @@ pub enum Operation {
         /// so it is acceptable here — unlike the agent tier, where it is the
         /// thing being protected.
         secret: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
     },
     Update {
         entry: String,
@@ -151,6 +153,8 @@ pub enum Operation {
         hidden: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secret: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        category: Option<String>,
     },
     Delete {
         entry: String,
@@ -366,6 +370,8 @@ pub struct ListEntry {
     pub granted: bool,
     /// Whether this entry is hidden until a grant exists.
     pub hidden: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// The `info` result.
@@ -385,6 +391,8 @@ pub struct InfoResult {
     pub updated_at: String,
     /// The authorisations that currently apply to this client and entry.
     pub grants: Vec<GrantView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// A grant as reported to a client. Deliberately omits the client's own
@@ -636,6 +644,7 @@ mod tests {
             description: None,
             granted: false,
             hidden: false,
+            category: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         assert!(!json.contains("value"));
@@ -654,6 +663,7 @@ mod tests {
             created_at: "now".into(),
             updated_at: "now".into(),
             grants: vec![],
+            category: None,
         };
         assert!(!serde_json::to_string(&info).unwrap().contains("value"));
     }
@@ -727,6 +737,7 @@ mod tests {
                 capabilities: vec![],
                 hidden: false,
                 secret: "s".into(),
+                category: None,
             },
             Operation::Delete { entry: "e".into() },
             Operation::Copy { entry: "e".into() },
