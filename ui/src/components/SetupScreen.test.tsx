@@ -76,7 +76,7 @@ describe('SetupScreen', () => {
     fireEvent.change(passInput, { target: { value: 'validpassphrase123' } })
     fireEvent.change(repeatInput, { target: { value: 'wrong' } })
     expect(screen.getByText('The two do not match.')).toBeInTheDocument()
-  )
+  })
 
   it('clears match error when passphrases are corrected', () => {
     render(<SetupScreen onCreated={mockOnCreated} />)

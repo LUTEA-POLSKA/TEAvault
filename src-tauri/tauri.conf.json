@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm --prefix ../ui run dev",
-    "beforeBuildCommand": "npm --prefix ../ui run build"
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "npm --prefix ui run build"
   },
   "app": {
     "windows": [
@@ -25,7 +25,7 @@
         "visible": true,
         "decorations": false,
         "shadow": false,
-        "titleBarStyle": "overlay",
+        "titleBarStyle": "Transparent",
         "theme": "Dark"
       }
     ],

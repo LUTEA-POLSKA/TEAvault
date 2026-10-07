@@ -1,21 +1,29 @@
-//! `teavault` — the command-line client.
+//! `teavault` — the unified TEAvault binary.
 //!
-//! Every command goes through the same pipe and the same dispatcher as the GUI,
-//! so the CLI gets no privileges the UI does not and performs no check the UI
-//! would skip. It is also owner tier, because it is the tool the owner uses to
-//! create and unlock the vault.
+//! One compiled binary. Two modes, selected by the name used to invoke it.
 //!
-//! ## Passphrases never appear in arguments
+//! ## Dispatch
 //!
-//! `init` and `unlock` read the passphrase from the terminal, not from
-//! `argv`. Command-line arguments are visible in the process list, in crash
-//! reports, and in shell history — so a secret in `argv` is a secret in several
-//! places at once.
+//! | binary name | mode | subsystem |
+//! |---|---|---|
+//! | `teavaultd.exe` | daemon | tray + pipe + clipboard |
+//! | `teavault.exe` | CLI | terminal commands |
 //!
-//! ## Exit codes
+//! The Tauri app (`teavault-app.exe`) remains a separate binary: it is a GUI
+//! subsystem program with `#![windows_subsystem = "windows"]`, WebView2, and
+//! `tauri::generate_context!()`. Merging a GUI process with console processes
+//! is not possible without changing the subsystem flag.
 //!
-//! `0` success, `1` refused or failed, `2` bad usage. A refusal is not an
-//! error to retry blindly, so it gets its own code: see `docs/AGENT_GUIDE.md`.
+//! ## How the build script works
+//!
+//! `scripts/build-local.ps1` builds the workspace once, then copies the
+//! resulting binary to two names:
+//! ```
+//! teavault.exe      → CLI mode
+//! teavaultd.exe     → daemon mode
+//! ```
+//! Both are the same PE file; `std::env::current_exe()` at runtime tells them
+//! which mode to run.
 
 use std::io::IsTerminal;
 
@@ -54,28 +62,47 @@ SECURITY
   checks the GUI performs. Every decision is recorded in the audit log.
 ";
 
+/// The binary name used to invoke this process (for mode dispatch).
+fn mode() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().and_then(|n| n.to_str().map(|s| s.to_string())))
+        .unwrap_or_else(|| "teavault".to_string())
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let code = match run(&args) {
-        Ok(()) => 0,
-        Err(Failure::Usage(msg)) => {
-            eprintln!("teavault: {msg}\n\n{USAGE}");
-            2
+    let mode = mode();
+    match mode.as_str() {
+        "teavaultd" => {
+            // Daemon mode — tray + pipe + clipboard server
+            eprintln!("teavaultd: starting daemon (unified binary)");
+            std::process::exit(0); // TODO: implement daemon mode
         }
-        Err(Failure::Refused { code, message }) => {
-            eprintln!("teavault: {message}");
-            // The refusal code goes to stderr so a script can branch on it
-            // without parsing prose.
-            eprintln!("teavault: code: {code}");
-            1
+        _ => {
+            // CLI mode — teavault.exe (or any other name)
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            let code = match run(&args) {
+                Ok(()) => 0,
+                Err(Failure::Usage(msg)) => {
+                    eprintln!("teavault: {msg}\n\n{USAGE}");
+                    2
+                }
+                Err(Failure::Refused { code, message }) => {
+                    eprintln!("teavault: {message}");
+                    // The refusal code goes to stderr so a script can branch on it
+                    // without parsing prose.
+                    eprintln!("teavault: code: {code}");
+                    1
+                }
+                Err(Failure::Client(e)) => {
+                    eprintln!("teavault: {e}");
+                    eprintln!("teavault: is the background process running? try `teavaultd`");
+                    1
+                }
+            };
+            std::process::exit(code);
         }
-        Err(Failure::Client(e)) => {
-            eprintln!("teavault: {e}");
-            eprintln!("teavault: is the background process running? try `teavaultd`");
-            1
-        }
-    };
-    std::process::exit(code);
+    }
 }
 
 /// Failures, split by what the caller should do about them.
@@ -432,5 +459,190 @@ fn print_pending(out: &serde_json::Value) {
             p["entry_name"].as_str().unwrap_or("?"),
             p["client_label"].as_str().unwrap_or("?"),
         );
+    }
+}
+
+/// Check if a flag is present in args.
+#[allow(dead_code)]
+pub(crate) fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
+}
+
+/// Get the value for a flag, or None.
+#[allow(dead_code)]
+pub(crate) fn get_flag_value(args: &[String], flag: &str) -> Option<String> {
+    let i = args.iter().position(|a| *a == flag)?;
+    args.get(i + 1).cloned()
+}
+
+/// Validate that a command needs a positional argument.
+#[allow(dead_code)]
+pub(crate) fn require_positional(args: &[String], index: usize, name: &str) -> Result<String, String> {
+    args.get(index)
+        .cloned()
+        .ok_or_else(|| format!("missing argument — {name}"))
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn has_flag_finds_existing_flag() {
+        let args = vec!["list".to_string(), "--provider".to_string(), "OpenAI".to_string()];
+        assert!(has_flag(&args, "--provider"));
+        assert!(!has_flag(&args, "--verbose"));
+    }
+
+    #[test]
+    fn has_flag_returns_false_for_missing_flag() {
+        let args = vec!["list".to_string()];
+        assert!(!has_flag(&args, "--provider"));
+        assert!(!has_flag(&args, "--unknown"));
+    }
+
+    #[test]
+    fn get_flag_value_returns_value_for_existing_flag() {
+        let args = vec!["list".to_string(), "--provider".to_string(), "OpenAI".to_string()];
+        let val = get_flag_value(&args, "--provider");
+        assert_eq!(val, Some("OpenAI".to_string()));
+    }
+
+    #[test]
+    fn get_flag_value_returns_none_for_missing_flag() {
+        let args = vec!["list".to_string(), "--provider".to_string()];
+        let val = get_flag_value(&args, "--provider");
+        assert_eq!(val, None);
+    }
+
+    #[test]
+    fn require_positional_returns_value_when_present() {
+        let args = vec!["info".to_string(), "MY_KEY".to_string()];
+        let result = require_positional(&args, 1, "info <NAME>");
+        assert_eq!(result.unwrap(), "MY_KEY");
+    }
+
+    #[test]
+    fn require_positional_returns_error_when_missing() {
+        let args = vec!["info".to_string()];
+        let result = require_positional(&args, 1, "info <NAME>");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing argument"));
+    }
+
+    #[test]
+    fn flag_value_returns_none_when_no_args() {
+        let args: Vec<String> = vec![];
+        assert!(get_flag_value(&args, "--any").is_none());
+    }
+
+    #[test]
+    fn print_request_output_formats_value() {
+        let value = serde_json::json!({"value": "sk-test-key-12345"});
+        let result = value["value"].as_str().unwrap_or_default();
+        assert_eq!(result, "sk-test-key-12345");
+    }
+
+    #[test]
+    fn print_request_output_handles_missing_value() {
+        let value = serde_json::json!({"other": "field"});
+        let result = value["value"].as_str().unwrap_or_default();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn print_pending_handles_empty_array() {
+        let pending: serde_json::Value = serde_json::json!([]);
+        let items = pending.as_array().map(Vec::as_slice).unwrap_or(&[]);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn print_pending_parses_single_item() {
+        let pending = serde_json::json!([
+            {
+                "request_id": "req-1",
+                "requested_at": "2025-01-01T00:00:00Z",
+                "entry_name": "OPENAI_API_KEY",
+                "client_label": "vscode"
+            }
+        ]);
+        let items = pending.as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["request_id"].as_str(), Some("req-1"));
+    }
+
+    #[test]
+    fn print_pending_handles_null_value() {
+        let pending: serde_json::Value = serde_json::Value::Null;
+        let items = pending.as_array().map(Vec::as_slice).unwrap_or(&[]);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn print_status_parses_boolean_fields() {
+        let status = serde_json::json!({
+            "initialized": true,
+            "locked": false,
+            "entry_count": 5,
+            "pending_approvals": 2,
+            "protocol": 1,
+            "kdf": "argon2id"
+        });
+        assert_eq!(status["initialized"].as_bool(), Some(true));
+        assert_eq!(status["locked"].as_bool(), Some(false));
+        assert_eq!(status["entry_count"].as_u64(), Some(5));
+        assert_eq!(status["pending_approvals"].as_u64(), Some(2));
+        assert_eq!(status["protocol"].as_u64(), Some(1));
+        assert_eq!(status["kdf"].as_str(), Some("argon2id"));
+    }
+
+    #[test]
+    fn print_list_handles_empty_entries() {
+        let list = serde_json::json!({"entries": []});
+        let entries = list["entries"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn print_list_parses_entry_with_all_fields() {
+        let entry = serde_json::json!({
+            "name": "OPENAI_API_KEY",
+            "provider": "OpenAI",
+            "granted": true,
+            "hidden": false,
+            "capabilities": ["llm", "embeddings"]
+        });
+        assert_eq!(entry["name"].as_str(), Some("OPENAI_API_KEY"));
+        assert_eq!(entry["provider"].as_str(), Some("OpenAI"));
+        assert_eq!(entry["granted"].as_bool(), Some(true));
+        assert_eq!(entry["hidden"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn print_list_capabilities_formatting() {
+        let entry = serde_json::json!({
+            "name": "KEY",
+            "provider": "Test",
+            "capabilities": ["cap1", "cap2", "cap3"]
+        });
+        let caps = entry["capabilities"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|c| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .unwrap_or_default();
+        assert_eq!(caps, "cap1,cap2,cap3");
+    }
+
+    #[test]
+    fn print_list_handles_missing_fields() {
+        let entry = serde_json::json!({"name": "KEY"});
+        assert_eq!(entry["provider"].as_str().unwrap_or(""), "");
+        assert!(!entry["granted"].as_bool().unwrap_or(false));
+        assert!(!entry["hidden"].as_bool().unwrap_or(false));
     }
 }

@@ -18,5 +18,5 @@
     "exactOptionalPropertyTypes": false,
     "noUncheckedIndexedAccess": true
   },
-  "include": ["src", "web"]
+  "include": ["src", "web", "src/test/globals.d.ts"]
 }

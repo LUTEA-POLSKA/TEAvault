@@ -215,11 +215,28 @@ pub fn delete_entry(client: State<'_, SharedClient>, entry: String) -> Result<se
 /// Copy to the clipboard. The daemon returns only the masked form, so the value
 /// never crosses back into the web view.
 #[tauri::command]
-pub fn copy_to_clipboard(
+pub fn copy(
     client: State<'_, SharedClient>,
     entry: String,
 ) -> Result<serde_json::Value, CommandError> {
     forward(client, "copy", Operation::Copy { entry })
+}
+
+/// Change the master passphrase. Re-wraps the key that protects the vault.
+#[tauri::command]
+pub fn change_passphrase(
+    client: State<'_, SharedClient>,
+    current: String,
+    new_passphrase: String,
+) -> Result<serde_json::Value, CommandError> {
+    forward(
+        client,
+        "change_passphrase",
+        Operation::ChangePassphrase {
+            current,
+            new: new_passphrase,
+        },
+    )
 }
 
 #[tauri::command]

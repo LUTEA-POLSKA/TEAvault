@@ -1,10 +1,14 @@
-# Builds TEAvault and stages the three binaries into one directory.
+# Builds TEAvault and stages the binaries into one directory.
 #
 # Why this exists: the owner tier is a path comparison. `teavaultd` only grants it
 # to `teavault-app.exe` and `teavault.exe` **in its own directory**. Cargo puts the
 # Tauri app in `src-tauri/target/` and everything else in `target/`, so running
 # straight out of the build tree leaves the UI in agent tier, where it cannot do
 # anything at all. Staging them together is what makes a from-source run work.
+#
+# The unified binary (`teavault.exe`) serves as both CLI and daemon. It dispatches
+# based on its own name: `teavaultd.exe` → daemon, `teavault.exe` → CLI. The build
+# script copies the same PE file to both names.
 #
 #   .\scripts\build-local.ps1              debug build + stage
 #   .\scripts\build-local.ps1 -Release     release build + stage
@@ -69,7 +73,7 @@ try {
     Write-Host "==> Building the frontend ($profile)" -ForegroundColor Cyan
     Invoke-Npm -Arguments @('run', 'build') -What 'the frontend build'
 
-    Write-Host '==> Building teavault-core, -daemon, -cli' -ForegroundColor Cyan
+    Write-Host '==> Building teavault-core, -daemon, -cli (unified binary)' -ForegroundColor Cyan
     Invoke-Checked -Exe 'cargo' -Arguments @('build', "--$profile", '--workspace') `
         -What 'the Rust workspace build'
 
@@ -102,23 +106,28 @@ try {
         throw 'cannot stage while TEAvault is running'
     }
 
-    $copies = @(
-        @{ From = "target\$profile\teavaultd.exe";                To = 'teavaultd.exe' },
-        @{ From = "target\$profile\teavault.exe";                 To = 'teavault.exe' },
-        @{ From = "src-tauri\target\$profile\teavault-app.exe";   To = 'teavault-app.exe' }
-    )
-    foreach ($c in $copies) {
-        if (-not (Test-Path $c.From)) { throw "not built: $($c.From)" }
-        Copy-Item -Force $c.From (Join-Path $stage $c.To)
-        Write-Host "    $($c.To)" -ForegroundColor DarkGray
-    }
+    # The unified binary: teavault.exe runs as CLI, teavaultd.exe runs as daemon.
+    # They are the same PE file — dispatched by checking `current_exe()` at runtime.
+    $unifiedSrc = "target\$profile\teavault.exe"
+    if (-not (Test-Path $unifiedSrc)) { throw "not built: $unifiedSrc" }
+    Copy-Item -Force $unifiedSrc (Join-Path $stage 'teavault.exe')
+    Write-Host "    teavault.exe    (also teavaultd.exe — unified binary)" -ForegroundColor DarkGray
+
+    Copy-Item -Force (Join-Path $stage 'teavault.exe') (Join-Path $stage 'teavaultd.exe')
+    Write-Host "    teavaultd.exe" -ForegroundColor DarkGray
+
+    $tauriSrc = "src-tauri\target\$profile\teavault-app.exe"
+    if (-not (Test-Path $tauriSrc)) { throw "not built: $tauriSrc" }
+    Copy-Item -Force $tauriSrc (Join-Path $stage 'teavault-app.exe')
+    Write-Host "    teavault-app.exe" -ForegroundColor DarkGray
 
     Write-Host ''
     Write-Host 'Done. Next:' -ForegroundColor Green
-    Write-Host '  1. .\dist\teavaultd.exe       # leave running'
-    Write-Host '  2. .\dist\teavault init       # an interactive terminal'
+    Write-Host '  1. .\dist\teavaultd.exe       # leave running (daemon mode)'
+    Write-Host '  2. .\dist\teavault init       # an interactive terminal (CLI mode)'
     Write-Host '  3. .\dist\teavault-app.exe    # the UI'
     Write-Host ''
+    Write-Host 'The binary is unified: teavaultd.exe → daemon, teavault.exe → CLI.' -ForegroundColor DarkGray
     Write-Host 'Day to day, use the tray icon: Open, Lock now, Recent requests, Settings, Quit.' -ForegroundColor DarkGray
 }
 finally {

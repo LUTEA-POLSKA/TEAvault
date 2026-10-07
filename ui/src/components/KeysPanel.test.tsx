@@ -21,11 +21,9 @@ const mockEntries = [
     id: 'entry-2',
     name: 'INTERNAL_SECRET',
     provider: 'Internal',
-    description: null,
     capabilities: ['internal'],
     granted: false,
     hidden: true,
-    category: null,
     display_name: 'Acme',
     available: true,
     updated_at: '2025-01-02T00:00:00Z',
@@ -219,3 +217,4 @@ describe('KeysPanel', () => {
     expect(screen.getByText('Uncategorized')).toBeInTheDocument()
   })
 })
+

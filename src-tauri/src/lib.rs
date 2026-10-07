@@ -126,7 +126,7 @@ pub fn run() {
             commands::create_entry,
             commands::update_entry,
             commands::delete_entry,
-            commands::copy_to_clipboard,
+            commands::copy,
             commands::access_overview,
             commands::grant,
             commands::revoke_grant,
@@ -137,6 +137,7 @@ pub fn run() {
             commands::audit_recent,
             commands::backup_export,
             commands::backup_import,
+            commands::change_passphrase,
         ])
         .setup(|app| {
             // Connect once, here. The UI holds a client for its lifetime, so a
