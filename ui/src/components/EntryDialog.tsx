@@ -122,7 +122,7 @@ export function EntryDialog({
     <Modal
       open
       onClose={onClose}
-      title={editing ? `Edit ${entry!.name}` : 'Add a key'}
+      title={editing ? `Edit ${entry.name}` : 'Add a key'}
       description={
         editing
           ? 'The value stays as it is unless you replace it below.'

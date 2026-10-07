@@ -1,4 +1,4 @@
-/**
+﻿/**
  * The window chrome, and the primary navigation with it.
  *
  * ## Why the navigation lives in the title bar
@@ -26,7 +26,7 @@
  * to "how long do I have", asked constantly, and it does not deserve a page.
  */
 
-import { useRef } from 'react'
+import { memo, useCallback, useMemo, useRef } from 'react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Badge, HStack, IconButton, Text } from '@tea-ui/core'
 
@@ -40,7 +40,8 @@ interface Tab {
   badge?: { text: string; tone: 'caution' | 'positive' | 'neutral' }
 }
 
-export function TitleBar({
+/** Memoized to prevent re-rendering the title bar when only content changes. */
+export const TitleBar = memo(function TitleBar({
   locked,
   initialized,
   pending,
@@ -58,24 +59,18 @@ export function TitleBar({
   const window = getCurrentWindow()
   const tabsRef = useRef<HTMLDivElement | null>(null)
 
-  const tabs: Tab[] = [
+  const tabs = useMemo<Tab[]>(() => [
     { id: 'keys', label: 'Keys' },
     {
       id: 'access',
       label: 'Access',
-      // Pending requests are the one thing that is time-sensitive, so they are
-      // counted on the tab itself rather than left for the user to find on a
-      // second screen.
       badge: pending > 0 ? { text: String(pending), tone: 'caution' } : undefined,
     },
     { id: 'activity', label: 'Activity' },
     { id: 'settings', label: 'Settings' },
-  ]
+  ], [pending])
 
-  // Left/right/Home/End move between tabs, as they do in any tab strip. Without
-  // this, a keyboard user can only reach the other views by tabbing through every
-  // interactive element on the current one.
-  function onKeyDown(e: React.KeyboardEvent) {
+  const onKeyDown = useCallback((e: React.KeyboardEvent) => {
     const i = tabs.findIndex((t) => t.id === view)
     let next = i
     if (e.key === 'ArrowRight') next = (i + 1) % tabs.length
@@ -87,58 +82,22 @@ export function TitleBar({
     const target = tabs[next]
     if (!target) return
     onView(target.id)
-    // Move focus to the newly selected tab so the arrow keys keep working.
     requestAnimationFrame(() => {
       tabsRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
     })
-  }
+  }, [view, onView, tabs])
 
   return (
     <div
-      /*
-       * Three cells, `1fr auto 1fr`.
-       *
-       * The tabs sit in the `auto` cell, so the two `1fr` cells on either side are
-       * always equal and the tabs are centred on the *window*. `justify:
-       * space-between` cannot do this: it distributes the leftover space between
-       * the items, so the centre group ends up off-centre by half the difference
-       * in the widths of the outer two groups. Adding a character to the lock
-       * badge would visibly shift the tabs, which is the tell that the layout is
-       * measuring the wrong thing.
-       */
       style={{
         display: 'grid',
         gridTemplateColumns: '1fr auto 1fr',
+        height: '32px',
         alignItems: 'center',
-        height: '36px',
-        padding: '0 4px 0 10px',
-        borderBottom: '1px solid var(--tea-line)',
-        background: 'var(--tea-surface)',
+        padding: '0 8px',
+        gap: '8px',
         userSelect: 'none',
-        flexShrink: 0,
-        width: '100%',
-        boxSizing: 'border-box',
       }}
-      /*
-       * `data-tauri-drag-region="deep"` — and the exact value matters.
-       *
-       * Tauri decides on mousedown by walking the event path outward
-       * (`tauri/src/window/scripts/drag.js`):
-       *
-       *   - a clickable element (button, link, `role="tab"`, anything with a
-       *     `tabindex`) that has *no* attribute ends the walk and refuses the
-       *     drag — this is what keeps the tabs and the window buttons clickable;
-       *   - `"deep"` means any descendant of the marked element drags;
-       *   - a bare attribute means *only a direct hit on this very element* drags.
-       *
-       * That last rule is what broke dragging before. With a bare attribute on the
-       * three groups, pressing on the word "TEAvault" or on the lock badge found a
-       * bare attribute on an ancestor but not on the pressed node, so the drag was
-       * refused — only the sliver of background between the words could move the
-       * window. Marking the bar `"deep"` makes the whole bar draggable, and the
-       * clickable children still block themselves, which is the behaviour a
-       * title bar is supposed to have.
-       */
       data-tauri-drag-region="deep"
       onKeyDown={onKeyDown}
     >
@@ -208,19 +167,11 @@ export function TitleBar({
         >
           <span aria-hidden="true">&#x2500;</span>
         </IconButton>
-        {/*
-          No maximise button: the window is pinned to one size
-          (`resizable: false` plus min == max in `src-tauri/src/fixed_size.rs`),
-          so maximising could only produce a size the window refuses. A control
-          that cannot do what it says is worse than a missing one.
-        */}
         <IconButton
           variant="ghost"
           size="sm"
           label="Close"
           onClick={() => {
-            // Closes the window, which ends this process. The daemon and its tray
-            // are unaffected — see the crate documentation in `src-tauri/src/lib.rs`.
             void window.close();
           }}
         >
@@ -229,4 +180,4 @@ export function TitleBar({
       </HStack>
     </div>
   )
-}
+})

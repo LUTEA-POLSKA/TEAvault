@@ -1052,4 +1052,114 @@ mod tests {
         let c = check();
         assert!(c.permits(r"C:\Program Files\TEAvault\teavault-app.exe", Tier::Agent));
     }
+
+    // --- IPC message parsing tests ---
+
+    #[test]
+    fn request_serializes_with_correct_version() {
+        let req = Request::new("test-id", Operation::List { provider: None });
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["v"], PROTOCOL as u64);
+        assert_eq!(parsed["id"], "test-id");
+        assert_eq!(parsed["op"], "list");
+    }
+
+    #[test]
+    fn request_serializes_request_op_with_entry() {
+        let req = Request::new("2", Operation::Request {
+            entry: "OPENAI_API_KEY".into(),
+            purpose: Some("test access".into()),
+        });
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["op"], "request");
+        assert_eq!(parsed["entry"], "OPENAI_API_KEY");
+        assert_eq!(parsed["purpose"], "test access");
+    }
+
+    #[test]
+    fn response_serializes_ok_result() {
+        let resp = Response::ok("req-1", serde_json::json!({"entries": []}));
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // No `ok` field — success is indicated by presence of `result`
+        assert!(parsed.get("result").is_some());
+        assert!(parsed.get("error").is_none());
+        assert_eq!(parsed["v"], PROTOCOL as u64);
+        assert_eq!(parsed["id"], "req-1");
+    }
+
+    #[test]
+    fn response_serializes_error() {
+        let err = Error::Locked;
+        let resp = Response::err("req-2", err);
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // No `ok` field — error is indicated by presence of `error`
+        assert!(parsed.get("error").is_some());
+        assert!(parsed.get("result").is_none());
+        assert_eq!(parsed["v"], PROTOCOL as u64);
+        assert_eq!(parsed["id"], "req-2");
+        assert_eq!(parsed["error"]["code"], "locked");
+    }
+
+    #[test]
+    fn tier_serializes_to_snake_case() {
+        let agent_json = serde_json::to_string(&Tier::Agent).unwrap();
+        assert_eq!(agent_json, "\"agent\"");
+        let owner_json = serde_json::to_string(&Tier::Owner).unwrap();
+        assert_eq!(owner_json, "\"owner\"");
+    }
+
+    #[test]
+    fn tier_deserializes_from_snake_case() {
+        let agent: Tier = serde_json::from_str("\"agent\"").unwrap();
+        assert_eq!(agent, Tier::Agent);
+        let owner: Tier = serde_json::from_str("\"owner\"").unwrap();
+        assert_eq!(owner, Tier::Owner);
+    }
+
+    #[test]
+    fn grant_mode_wire_serializes_correctly() {
+        let once = serde_json::to_string(&GrantModeWire::AllowOnce).unwrap();
+        assert_eq!(once, "\"allow_once\"");
+        let deny = serde_json::to_string(&GrantModeWire::Deny).unwrap();
+        assert_eq!(deny, "\"deny\"");
+    }
+
+    #[test]
+    fn grant_mode_wire_deserializes_correctly() {
+        let once: GrantModeWire = serde_json::from_str("\"allow_once\"").unwrap();
+        assert_eq!(once, GrantModeWire::AllowOnce);
+        let deny: GrantModeWire = serde_json::from_str("\"deny\"").unwrap();
+        assert_eq!(deny, GrantModeWire::Deny);
+    }
+
+    #[test]
+    fn max_message_bytes_is_reasonable() {
+        assert_eq!(MAX_MESSAGE_BYTES, 64 * 1024);
+    }
+
+    #[test]
+    fn protocol_version_is_one() {
+        assert_eq!(PROTOCOL, 1);
+    }
+
+    #[test]
+    fn status_operation_serializes_correctly() {
+        let req = Request::new("1", Operation::Status);
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["op"], "status");
+        assert!(parsed.get("entry").is_none());
+    }
+
+    #[test]
+    fn lock_operation_serializes_correctly() {
+        let req = Request::new("1", Operation::Lock);
+        let json = serde_json::to_string(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["op"], "lock");
+    }
 }

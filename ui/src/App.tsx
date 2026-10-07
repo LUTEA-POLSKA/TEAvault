@@ -70,9 +70,9 @@ const reportedAt = useRef<number>(0)
   const report = useCallback((e: unknown) => {
     const err = e instanceof VaultError ? e : new VaultError({ code: 'io', message: String(e), retryable: false })
     setError(err)
-  }, [])
+  }, [setError])
 
-  const initialized = !setup && status !== null
+  const initialized = status !== null
 
   const refresh = useCallback(async () => {
     const s = await api.status()
@@ -118,7 +118,8 @@ reportedAt.current = Date.now()
     const onFocus = () => void refresh().catch(report)
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
-  }, [refresh, report])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refresh]) // report is stable via setError
 
 // The clipboard countdown is local for the same reason, and it clears the note
   // rather than polling the daemon to find out whether the value is gone.

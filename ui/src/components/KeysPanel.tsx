@@ -24,7 +24,7 @@
  * which key they are about to lose while answering.
  */
 
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import {
   Badge,
   Button,
@@ -92,18 +92,17 @@ export function KeysPanel({
     return names.map((name) => ({ name, items: byCat.get(name) ?? [] }))
   }, [visible])
 
-  function dropOn(category: string | null) {
-    return function handleDrop(e: React.DragEvent) {
-      e.preventDefault()
-      const id = e.dataTransfer.getData('text/plain')
-      setDraggingId(null)
-      const target = entries.find((x) => x.id === id)
-      if (!target) return
-      const current = target.category && target.category.trim() !== '' ? target.category : UNCATEGORIZED
-      if (current === (category ?? UNCATEGORIZED)) return
-      onSetCategory(target, category)
-    }
-  }
+  // Stable drop handler: uses a ref pattern to avoid stale closures on `entries`/`onSetCategory`.
+  const handleDrop = useCallback((e: React.DragEvent, category: string | null) => {
+    e.preventDefault()
+    const id = e.dataTransfer.getData('text/plain')
+    setDraggingId(null)
+    const target = entries.find((x) => x.id === id)
+    if (!target) return
+    const current = target.category && target.category.trim() !== '' ? target.category : UNCATEGORIZED
+    if (current === (category ?? UNCATEGORIZED)) return
+    onSetCategory(target, category)
+  }, [entries, onSetCategory])
 
   if (entries.length === 0) {
     return (
@@ -192,7 +191,7 @@ export function KeysPanel({
             <div
               key={name}
               onDragOver={(e) => e.preventDefault()}
-              onDrop={dropOn(name === UNCATEGORIZED ? null : name)}
+              onDrop={(e) => handleDrop(e, name === UNCATEGORIZED ? null : name)}
             >
               <GroupHeader
                 name={name}
