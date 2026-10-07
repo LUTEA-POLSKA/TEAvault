@@ -27,7 +27,6 @@ import {
   CardHeader,
   HStack,
   Input,
-  PasswordInput,
   Stack,
   Switch,
   Text,
@@ -36,13 +35,14 @@ import type { Settings } from '../api'
 import { CardTitle } from './Empty'
 import { LabelledField } from './LabelledField'
 import { OptionSelect } from './OptionSelect'
+import { PasswordField } from './PasswordField'
 
 const CLIPBOARD_CHOICES = [
-  { value: '0', text: 'Never' },
-  { value: '15', text: '15 seconds' },
-  { value: '30', text: '30 seconds' },
-  { value: '60', text: '1 minute' },
-  { value: '300', text: '5 minutes' },
+  { value: '0', label: 'Never' },
+  { value: '15', label: '15 seconds' },
+  { value: '30', label: '30 seconds' },
+  { value: '60', label: '1 minute' },
+  { value: '300', label: '5 minutes' },
 ]
 
 export function SettingsPanel({
@@ -113,7 +113,7 @@ export function SettingsPanel({
                     void onSave({ ...settings, clipboard_clear_seconds: Number(v) })
                   }
                   label={(v) =>
-                    CLIPBOARD_CHOICES.find((c) => c.value === v)?.text ?? 'Never'
+                    CLIPBOARD_CHOICES.find((c) => c.value === v)?.label ?? 'Never'
                   }
                   options={CLIPBOARD_CHOICES}
                 />
@@ -133,19 +133,21 @@ export function SettingsPanel({
         </CardHeader>
         <CardBody>
           <Stack gap="ui">
-            <LabelledField label="Current passphrase">
-              <PasswordInput
-                value={current}
-                onValueChange={setCurrent}
-                autoComplete="current-password"
-              />
-            </LabelledField>
-            <LabelledField
+            <PasswordField
+              label="Current passphrase"
+              value={current}
+              onValueChange={setCurrent}
+              autoComplete="current-password"
+              className="w-full"
+            />
+            <PasswordField
               label="New passphrase"
               description={`At least ${settings.min_passphrase_chars} characters.`}
-            >
-              <PasswordInput value={next} onValueChange={setNext} autoComplete="new-password" />
-            </LabelledField>
+              value={next}
+              onValueChange={setNext}
+              autoComplete="new-password"
+              className="w-full"
+            />
             <HStack justify="end">
               <Button
                 size="sm"
@@ -218,14 +220,13 @@ function ExportBlock({
           className="w-full font-mono"
         />
       </LabelledField>
-      <LabelledField label="Backup passphrase">
-        <PasswordInput
-          value={passphrase}
-          onValueChange={setPassphrase}
-          autoComplete="off"
-          size="lg"
-        />
-      </LabelledField>
+      <PasswordField
+              label="Backup passphrase"
+              value={passphrase}
+              onValueChange={setPassphrase}
+              autoComplete="off"
+              className="w-full"
+            />
       <HStack justify="end">
         <Button
           size="sm"
@@ -266,9 +267,13 @@ function RestoreBlock({
           className="w-full font-mono"
         />
       </LabelledField>
-      <LabelledField label="Backup passphrase">
-        <PasswordInput value={passphrase} onValueChange={setPassphrase} autoComplete="off" />
-      </LabelledField>
+      <PasswordField
+        label="Backup passphrase"
+        value={passphrase}
+        onValueChange={setPassphrase}
+        autoComplete="off"
+        className="w-full"
+      />
       <div>
         <Switch
           checked={overwrite}

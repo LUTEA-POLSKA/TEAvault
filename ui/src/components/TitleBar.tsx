@@ -42,12 +42,14 @@ interface Tab {
 
 export function TitleBar({
   locked,
+  initialized,
   pending,
   view,
   onView,
   onLock,
 }: {
   locked: boolean
+  initialized: boolean
   pending: number
   view: View
   onView: (v: View) => void
@@ -149,12 +151,13 @@ export function TitleBar({
         </Badge>
       </HStack>
 
-      <div
-        ref={tabsRef}
-        role="tablist"
-        aria-label="Views"
-        style={{ display: 'flex', gap: '2px', justifySelf: 'center' }}
-      >
+      {initialized && !locked && (
+        <div
+          ref={tabsRef}
+          role="tablist"
+          aria-label="Views"
+          style={{ display: 'flex', gap: '2px', justifySelf: 'center' }}
+        >
         {tabs.map((t) => {
           const active = t.id === view
           return (
@@ -188,7 +191,8 @@ export function TitleBar({
             </button>
           )
         })}
-      </div>
+        </div>
+      )}
 
       <HStack gap="none" align="center" style={{ justifySelf: 'end' }}>
         {!locked && (

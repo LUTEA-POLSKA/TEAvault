@@ -34,7 +34,8 @@ export function OptionSelect({
   onValueChange: (value: string) => void
   /** The visible name of the current option. */
   label: (value: string) => string
-  options: { value: string; text: string }[]
+  /** The options to display in the dropdown. */
+  options: { value: string; label: string }[]
 }) {
   return (
     <Select value={value} onValueChange={onValueChange}>
@@ -44,7 +45,7 @@ export function OptionSelect({
       <SelectContent>
         {options.map((o) => (
           <SelectItem key={o.value} value={o.value}>
-            {o.text}
+            {o.label}
           </SelectItem>
         ))}
       </SelectContent>

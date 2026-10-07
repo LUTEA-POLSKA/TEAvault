@@ -34,7 +34,7 @@ export function EmptyState({
 export function CardTitle({ children }: { children: React.ReactNode }) {
   return (
     <Text size="ui" weight="semibold" asChild={false}>
-      {children}
+      <span role="heading" aria-level={2}>{children}</span>
     </Text>
   )
 }

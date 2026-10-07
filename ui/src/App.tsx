@@ -72,6 +72,8 @@ const reportedAt = useRef<number>(0)
     setError(err)
   }, [])
 
+  const initialized = !setup && status !== null
+
   const refresh = useCallback(async () => {
     const s = await api.status()
     setStatus(s)
@@ -147,7 +149,6 @@ reportedAt.current = Date.now()
   }
 
   const locked = status?.locked ?? true
-  const initialized = status?.initialized ?? false
   const pendingCount = pending.length
 
   const errorText = useMemo(() => {
@@ -184,7 +185,7 @@ reportedAt.current = Date.now()
 
   if (!initialized) {
     return (
-      <Shell locked pending={0} view={view} onView={setView} onLock={() => {}}>
+      <Shell locked initialized pending={0} view={view} onView={setView} onLock={() => {}}>
         <SetupScreen
           onCreated={async (passphrase) => {
             await guard('created', async () => {
@@ -200,6 +201,7 @@ reportedAt.current = Date.now()
   return (
     <Shell
 locked={locked}
+      initialized
       pending={pendingCount}
       view={view}
       onView={(v) => {
@@ -449,6 +451,7 @@ onBackup={async (file, passphrase) => {
  */
 function Shell({
   locked,
+  initialized,
   pending,
   view,
   onView,
@@ -456,6 +459,7 @@ function Shell({
   children,
 }: {
   locked: boolean
+  initialized: boolean
   pending: number
   view: View
   onView: (v: View) => void
@@ -478,7 +482,8 @@ return (
       }}
     >
       <TitleBar
-locked={locked}
+        locked={locked}
+        initialized={initialized}
         pending={pending}
         view={view}
         onView={onView}

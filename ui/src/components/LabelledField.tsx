@@ -9,12 +9,15 @@
  * screen, because a dangling `aria-describedby` is a validation error and is
  * silently dropped by some screen readers.
  *
- * That means `<Field label=… description=…>` — the shape the old UI used — does
- * not exist. Composing the parts by hand in every form would put the wiring at
- * the mercy of whoever wrote the form next, so it is composed once here, from the
- * real components, and the control is cloned with the real props.
+ * This component composes those parts, cloning the child with the generated
+ * props so every control gets wired to its label and any description or error
+ * text. It works with `Input`, `Select`, `OptionSelect`, etc. — anything that
+ * accepts `aria-*` and `id` props.
  *
- * Nothing is reimplemented: every element below is TEAui's.
+ * For `PasswordInput` use `PasswordField` instead: cloning a password input
+ * corrupts its internal toggle button and causes two eye icons to render.
+ *
+ * Nothing here is reimplemented: every element is TEAui's own component.
  */
 
 import { cloneElement, type ReactElement, type ReactNode } from 'react'

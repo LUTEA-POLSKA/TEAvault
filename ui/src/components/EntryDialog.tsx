@@ -66,7 +66,9 @@ export function EntryDialog({
   const [secret, setSecret] = useState('')
   const [hidden, setHidden] = useState(entry?.hidden ?? false)
   const [category, setCategory] = useState(entry?.category ?? '')
-  const [capabilities, setCapabilities] = useState('')
+  const [capabilities, setCapabilities] = useState(
+    entry?.capabilities ? entry.capabilities.join(', ') : '',
+  )
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
 

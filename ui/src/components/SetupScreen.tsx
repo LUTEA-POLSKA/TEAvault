@@ -20,11 +20,10 @@ import {
   Card,
   CardBody,
   HStack,
-  PasswordInput,
   Stack,
   Text,
 } from '@tea-ui/core'
-import { LabelledField } from './LabelledField'
+import { PasswordField } from './PasswordField'
 
 export function SetupScreen({
   onCreated,
@@ -91,33 +90,25 @@ export function SetupScreen({
                 </Alert>
               )}
 
-              <LabelledField
+              <PasswordField
                 label="Master passphrase"
                 description={`At least ${MIN} characters. A sentence beats a short string.`}
                 error={pass.length > 0 && !longEnough ? `At least ${MIN} characters.` : undefined}
-              >
-                <PasswordInput
-                  className="w-full"
-                  size="lg"
-                  value={pass}
-                  onValueChange={setPass}
-                  autoFocus
-                  autoComplete="new-password"
-                />
-              </LabelledField>
+                value={pass}
+                onValueChange={setPass}
+                autoFocus
+                autoComplete="new-password"
+                className="w-full"
+              />
 
-              <LabelledField
+              <PasswordField
                 label="Repeat it"
                 error={repeat.length > 0 && !matches ? 'The two do not match.' : undefined}
-              >
-                <PasswordInput
-                  className="w-full"
-                  size="lg"
-                  value={repeat}
-                  onValueChange={setRepeat}
-                  autoComplete="new-password"
-                />
-              </LabelledField>
+                value={repeat}
+                onValueChange={setRepeat}
+                autoComplete="new-password"
+                className="w-full"
+              />
 
               <HStack align="center" justify="end" gap="ui">
                 <Text size="ui" tone="subtle">

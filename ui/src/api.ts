@@ -185,7 +185,10 @@ export interface Grant {
 /** Settings exactly as the daemon stores them. */
 interface WireSettings {
   clipboard_clear_seconds: number
+  autostart: boolean
+  close_window_hides: boolean
   min_passphrase_chars: number
+  auto_backup_every_changes: number
   created_at: string
   updated_at: string
 }
@@ -193,7 +196,10 @@ interface WireSettings {
 /** Settings as a control wants them. */
 export interface Settings {
   clipboard_clear_seconds: number
+  autostart: boolean
+  close_window_hides: boolean
   min_passphrase_chars: number
+  auto_backup_every_changes: number
   created_at: string
   updated_at: string
 }
@@ -215,7 +221,10 @@ export type GrantModeWire = 'allow_once' | 'always_allow' | 'deny'
 function fromWire(w: WireSettings): Settings {
   return {
     clipboard_clear_seconds: w.clipboard_clear_seconds,
+    autostart: w.autostart,
+    close_window_hides: w.close_window_hides,
     min_passphrase_chars: w.min_passphrase_chars,
+    auto_backup_every_changes: w.auto_backup_every_changes,
     created_at: w.created_at,
     updated_at: w.updated_at,
   }
@@ -224,7 +233,10 @@ function fromWire(w: WireSettings): Settings {
 function toWire(s: Settings): WireSettings {
   return {
     clipboard_clear_seconds: s.clipboard_clear_seconds,
+    autostart: s.autostart,
+    close_window_hides: s.close_window_hides,
     min_passphrase_chars: s.min_passphrase_chars,
+    auto_backup_every_changes: s.auto_backup_every_changes,
     created_at: s.created_at,
     updated_at: s.updated_at,
   }
@@ -289,7 +301,7 @@ export const api = {
   ) => call<ApiKeyMetadata>('update_entry', { entry, ...input }),
 
   deleteEntry: (entry: string) => call<{ deleted: boolean }>('delete_entry', { entry }),
-  copyToClipboard: (entry: string) => call<{ masked: string }>('copy_to_clipboard', { entry }),
+  copyToClipboard: (entry: string) => call<{ masked: string }>('copy', { entry }),
 
   accessOverview: () => call<AccessRow[]>('access_overview').then(toRows),
   knownClients: () => call<[string, string][]>('known_clients').then(toKnownClients),

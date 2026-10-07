@@ -65,7 +65,10 @@ function refuse(code: string, message: string, retryable = false): never {
 /** Private wire settings — not exported from api.ts, so declared locally. */
 interface WireSettings {
   clipboard_clear_seconds: number
+  autostart: boolean
+  close_window_hides: boolean
   min_passphrase_chars: number
+  auto_backup_every_changes: number
   created_at: string
   updated_at: string
 }
@@ -118,7 +121,10 @@ function freshState(): State {
     clients: [[CLIENT.fingerprint, CLIENT.label]],
     settings: {
       clipboard_clear_seconds: 30,
+      autostart: false,
+      close_window_hides: true,
       min_passphrase_chars: 12,
+      auto_backup_every_changes: 10,
       created_at: EPOCH,
       updated_at: EPOCH,
     },

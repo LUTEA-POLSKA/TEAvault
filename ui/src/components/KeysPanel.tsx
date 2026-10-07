@@ -32,14 +32,13 @@ import {
   Card,
   CardBody,
   HStack,
-  PasswordInput,
   SearchInput,
   Stack,
   Text,
 } from '@tea-ui/core'
-import { LabelledField } from './LabelledField'
 import { EmptyState } from './Empty'
 import type { ListEntry } from '../api'
+import { PasswordField } from './PasswordField'
 
 /** The group shown for entries without a category, and the drop target for clearing one. */
 const UNCATEGORIZED = 'Uncategorized'
@@ -401,19 +400,15 @@ export function UnlockPanel({
                 Unlock TEAvault
               </Text>
 
-              <LabelledField label="Master passphrase" error={error ?? undefined}>
-                <PasswordInput
-                  // Taller than the TEAui default. This is the field the user comes
-                  // back to every time, and a 28px target for a long passphrase is
-                  // needlessly fiddly on a desktop.
+              <PasswordField
+                  label="Master passphrase"
+                  error={error ?? undefined}
                   className="w-full"
-                  size="lg"
                   value={pass}
                   onValueChange={setPass}
                   autoFocus
                   autoComplete="current-password"
                 />
-              </LabelledField>
 
               <Button type="submit" variant="primary" size="sm" loading={busy} disabled={!pass}>
                 Unlock
